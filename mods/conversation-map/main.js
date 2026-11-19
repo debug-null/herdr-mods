@@ -1,10 +1,11 @@
 // Conversation map for the live Agent pane: a right-edge tick rail, one short
-// bar per user turn in the focused agent's current session. Reads transcripts
-// through history.py (same sources as History). History panel is unchanged.
+// bar per user turn in the *active tab's* agent session. Bound to that tab's
+// pane — not whichever agent last held global focus (clicking the map must
+// not jump to another space/agent).
 
 import { View, div } from "gpui-kit";
 import { v_flex } from "gpui-base";
-import { agents, terminals, panes, focused, exec, appHome, theme, checking, run, notify, setShared } from "herdr";
+import { agents, terminals, panes, spaces, exec, appHome, theme, checking, run, notify, setShared } from "herdr";
 
 const SCRIPT = () => `${appHome()}/mods/history/history.py`;
 const REMOTE_SCRIPT = '"$HOME/.config/herdr-app/mods/history/history.py"';
@@ -42,10 +43,10 @@ function shQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-function agentKind(term, agent) {
-  const app = agent?.app || term?.status?.app || term?.report?.app || null;
+function agentKind(term, agent, pane) {
+  const app = agent?.app || pane?.app || term?.status?.app || term?.report?.app || null;
   if (app && APP_TO_AGENT[app]) return APP_TO_AGENT[app];
-  const key = term?.program?.key || agent?.program?.key;
+  const key = term?.program?.key || agent?.program?.key || pane?.program?.key;
   if (key && KEY_TO_AGENT[key]) return KEY_TO_AGENT[key];
   const argv0 = term?.foreground?.argv?.[0] || term?.argv?.[0] || "";
   const base = String(argv0).split("/").pop().toLowerCase();
@@ -70,30 +71,30 @@ function resumeId(term) {
   return null;
 }
 
+// Agent in the *shown* space + tab only. Never follow agents().focused after the
+// map steals focus — that was switching people into another agent's space.
 function targetAgent() {
-  const f = focused();
-  const list = agents();
-  let agent = list.find((a) => a.focused) || null;
-  if (!agent && f?.agent) agent = list.find((a) => a.address === f.agent) || null;
-  if (!agent && f?.terminal) agent = list.find((a) => a.address === f.terminal) || null;
-  if (!agent) {
-    const pane = panes().find((p) => p.focused && p.status);
-    if (pane?.terminal) agent = list.find((a) => a.address === pane.terminal) || null;
-  }
-  if (!agent) return null;
-  const term = terminals().find((t) => t.address === agent.address) || null;
-  const kind = agentKind(term, agent);
+  const space = spaces().find((s) => s.active);
+  if (!space) return null;
+  const tab = (space.tabs || []).find((t) => t.active) || (space.tabs || [])[0];
+  if (!tab) return null;
+  const tabPanes = panes().filter((p) => p.tab === tab.id && p.terminal && (p.status || p.program?.agent));
+  const pane = tabPanes.find((p) => p.focused) || tabPanes[0] || null;
+  if (!pane?.terminal) return null;
+  const address = pane.terminal;
+  const agent = agents().find((a) => a.address === address) || null;
+  const term = terminals().find((t) => t.address === address) || null;
+  const kind = agentKind(term, agent, pane);
   if (!kind) return null;
-  const pane = panes().find((p) => p.terminal === agent.address);
-  const cwd = pane?.cwd || term?.cwd || term?.foreground?.cwd || f?.cwd || null;
   return {
-    address: agent.address,
+    address,
+    pane: pane.pane,
     kind,
-    cwd,
-    machine: hostOf(agent.address),
+    cwd: pane.cwd || term?.cwd || term?.foreground?.cwd || null,
+    machine: hostOf(address),
     resume: resumeId(term),
     turnHint: Number(term?.turn) || 0,
-    title: agent.title || term?.title || "",
+    title: agent?.title || pane.title || term?.title || "",
   };
 }
 
@@ -101,54 +102,50 @@ export default class ConversationMap extends View {
   init(_props, cx) {
     this.turns = []; // [{ text }]
     this.active = 0;
-    this.key = null; // address|kind|resume
-    this.session = null; // matched history session for jump
+    this.key = null;
+    this.session = null;
     this.target = null;
     this.loading = false;
     this.error = null;
+    this._jumping = false;
     if (checking()) return;
-    cx.timer.every(POLL_MS, (cx) => this.refresh(cx));
+    cx.timer.every(POLL_MS, (cx) => {
+      if (!this._jumping) this.refresh(cx);
+    });
     this.refresh(cx);
   }
 
-  // Focus the live agent, scroll its view toward that turn, and open History at it.
+  // Jump inside the *same* tab agent only — never agent.focus (that switches spaces).
   jumpTo(k, cx) {
-    const target = this.target || targetAgent();
+    const target = this.target;
     const turn = this.turns[k];
-    if (!turn) return;
+    if (!target?.address || !turn) return;
     this.active = k;
+    this._jumping = true;
     cx.notify();
 
-    if (target?.address) {
-      run("agent.focus", { terminal: target.address });
-      const n = Math.max(1, this.turns.length);
-      // Rough place in scrollback: early turns → top, latest → bottom.
-      if (k <= 0) run("terminal.scroll", { to: "top", terminal: target.address });
-      else if (k >= n - 1) run("terminal.scroll", { to: "bottom", terminal: target.address });
-      else {
-        run("terminal.scroll", { to: "top", terminal: target.address });
-        const pages = Math.max(0.5, (k / (n - 1)) * 12);
-        cx.timer.after(80, () => run("terminal.scroll", { pages, terminal: target.address }));
-      }
-      // Open find bar so the person can refine; needle is in the toast.
-      const needle = (turn.text || "").replace(/\s+/g, " ").trim().slice(0, 48);
-      if (needle && !/^第 \d+ 轮$/.test(needle)) {
-        cx.timer.after(120, () => {
-          try { run("terminal.search", { query: needle, terminal: target.address }); }
-          catch { try { run("terminal.search"); } catch { /* find bar optional */ } }
-        });
-      }
+    // Keep keyboard on this pane; do not call agent.focus (cross-space).
+    if (target.pane) run("pane.focus", { pane: target.pane });
+    else run("pane.focus", { terminal: target.address });
+
+    const n = Math.max(1, this.turns.length);
+    if (k <= 0) run("terminal.scroll", { to: "top", terminal: target.address });
+    else if (k >= n - 1) run("terminal.scroll", { to: "bottom", terminal: target.address });
+    else {
+      run("terminal.scroll", { to: "top", terminal: target.address });
+      const pages = Math.max(0.5, (k / (n - 1)) * 12);
+      cx.timer.after(80, () => run("terminal.scroll", { pages, terminal: target.address }));
     }
 
     if (this.session?.file) {
       const needle = (turn.text || "").replace(/\s+/g, " ").trim();
       setShared("history.jump", {
         at: Date.now(),
-        host: this.session._host || target?.machine || "local",
+        host: this.session._host || target.machine || "local",
         agent: this.session.agent,
         id: this.session.id,
         file: this.session.file,
-        cwd: this.session.cwd || target?.cwd || null,
+        cwd: this.session.cwd || target.cwd || null,
         title: this.session.title || "",
         turns: this.session.turns || this.turns.length,
         updated: this.session.updated || Date.now(),
@@ -168,6 +165,7 @@ export default class ConversationMap extends View {
       level: "info",
       timeout: 2500,
     });
+    cx.timer.after(600, (cx) => { this._jumping = false; cx.notify(); });
   }
 
   async historyExec(machine, args) {
@@ -183,20 +181,20 @@ export default class ConversationMap extends View {
       const hit = mine.find((s) => s.id === target.resume || (s.file || "").includes(target.resume));
       if (hit) return hit;
     }
+    // Prefer exact cwd match over "related" paths from list --cwd.
+    const cwd = target.cwd;
+    if (cwd) {
+      const exact = mine.filter((s) => s.cwd === cwd);
+      if (exact.length) return [...exact].sort((a, b) => (b.updated || 0) - (a.updated || 0))[0];
+    }
     return [...mine].sort((a, b) => (b.updated || 0) - (a.updated || 0))[0];
   }
 
   refresh(cx, { force = false } = {}) {
+    if (this._jumping && !force) return;
     const target = targetAgent();
     if (!target) {
-      if (this.turns.length || this.key) {
-        this.turns = [];
-        this.session = null;
-        this.target = null;
-        this.key = null;
-        this.error = null;
-        cx.notify();
-      }
+      // Map click / History focus can clear pane focus — keep the pinned tab target.
       return;
     }
     const key = `${target.address}\0${target.kind}\0${target.resume || ""}\0${target.cwd || ""}`;
@@ -205,7 +203,6 @@ export default class ConversationMap extends View {
     this.key = key;
     this.target = target;
     this.loading = true;
-    // Optimistic ticks from core's turn counter while transcript loads.
     if (!this.turns.length && target.turnHint > 0) {
       this.turns = Array.from({ length: Math.min(target.turnHint, 48) }, (_, i) => ({ text: `第 ${i + 1} 轮` }));
       this.active = this.turns.length - 1;
@@ -230,7 +227,6 @@ export default class ConversationMap extends View {
           this.loadedAt = Date.now();
           return;
         }
-        // Prefer index turn count immediately (full session), then titles from show.
         const n = Math.max(session.turns || 0, target.turnHint || 0);
         if (n > this.turns.length) {
           this.turns = Array.from({ length: Math.min(n, 48) }, (_, i) => ({
@@ -247,14 +243,10 @@ export default class ConversationMap extends View {
         const fromShow = messages
           .filter((m) => m.role === "user")
           .map((m) => ({ text: (m.text || "").replace(/\s+/g, " ").trim() }));
-        // show() is a tail window — keep the larger of index count vs parsed tail.
         if (fromShow.length >= this.turns.length) this.turns = fromShow;
         else if (fromShow.length) {
           const head = Math.max(0, this.turns.length - fromShow.length);
-          this.turns = [
-            ...this.turns.slice(0, head),
-            ...fromShow,
-          ];
+          this.turns = [...this.turns.slice(0, head), ...fromShow];
         }
         this.active = Math.max(0, this.turns.length - 1);
         this.error = null;
@@ -271,17 +263,18 @@ export default class ConversationMap extends View {
   render(cx) {
     const t = theme();
     const target = targetAgent();
-    const nextKey = target
-      ? `${target.address}\0${target.kind}\0${target.resume || ""}\0${target.cwd || ""}`
-      : null;
-    if (nextKey !== this.key) this.refresh(cx, { force: true });
+    if (target) {
+      const nextKey = `${target.address}\0${target.kind}\0${target.resume || ""}\0${target.cwd || ""}`;
+      if (nextKey !== this.key && !this._jumping) this.refresh(cx, { force: true });
+    }
     const turns = this.turns;
-    if (!target || !turns.length) {
+    const shown = this.target;
+    if (!shown || !turns.length) {
       return div().id("conversation-map").size_full().bg(t.canvas);
     }
     return v_flex().id("conversation-map").size_full().py(8).items_center().justify_center()
       .bg(t.background).border_1().border_color(t.border).rounded(10)
-      .tooltip(`会话地图 · ${turns.length} 轮`)
+      .tooltip(`会话地图 · ${shown.title || shown.kind} · ${turns.length} 轮`)
       .children(turns.map((turn, k) => {
         const on = k === this.active;
         const title = turn.text.length > 28 ? `${turn.text.slice(0, 28)}…` : (turn.text || `第 ${k + 1} 轮`);
