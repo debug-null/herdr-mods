@@ -551,6 +551,21 @@ export default class History extends View {
     return matched;
   }
 
+  // Mini Conversation map on the session list: one short tick per turn (capped).
+  rowMap(turns, t) {
+    const n = Math.max(0, Number(turns) || 0);
+    const shown = Math.min(n, 10);
+    if (shown < 1) return div().w(14).flex_none();
+    return v_flex().id("session-map").w(14).flex_none().h(30).justify_center().items_center().gap(2)
+      .tooltip(`会话地图 · ${n} 轮`)
+      .children(Array.from({ length: shown }, (_, k) => {
+        const last = k === shown - 1;
+        return div().flex_none().rounded(99).h(2).w(last ? 12 : 8)
+          .bg(last ? t.foreground : t.muted)
+          .opacity(last ? 1 : 0.55);
+      }));
+  }
+
   sessionRow(s, t) {
     const key = `${sessionHost(s)}-${s.agent}-${s.id}`;
     const hot = this.hot === key;
@@ -578,6 +593,7 @@ export default class History extends View {
           .child(div().flex_none().child(`· ${s.turns} 次提问`))
           .when(this.scope === "global" || pinned, (el) => el.child(div().flex_none().child(`· ${hostLabel(sessionHost(s))}`)))
           .when(showWhere, (el) => el.child(div().min_w(0).truncate().child(`· ${s.cwd ? short(s.cwd, homePath) : "未归属"}`)))))
+      .child(this.rowMap(s.turns, t))
       .when(Boolean(AGENTS[s.agent]?.resume), (el) => el.child(this.quickResume(s, hot, t)));
   }
 
@@ -697,6 +713,8 @@ export default class History extends View {
           .hover((st) => st.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { this.open = null; this.transcript = null; cx.notify(); }).child("‹"),
         this.icon(s.agent, 16, t),
         div().flex_1().min_w(0).font_semibold().truncate().child(s.title || "(untitled)"),
+        div().flex_none().px(6).py(2).rounded(5).border_1().border_color(t.border).text_size(10).text_color(t.muted)
+          .child(`地图 ${s.turns || 0}`),
         div().id("history-pin").size(28).flex_none().flex().items_center().justify_center().rounded(7).cursor_pointer()
           .text_size(14).text_color(pinned ? t.accent : t.dim)
           .hover((st) => st.bg(t.hover).text_color(t.foreground))
@@ -753,20 +771,20 @@ export default class History extends View {
 
   // Conversation map — CodeBridge-style: vertical rail of short horizontal ticks.
   conversationMap(turns, messages, current, t) {
-    return v_flex().id("history-conversation-map").w(22).flex_none().h_full().py(12).items_center().justify_center()
-      .opacity(0.45).hover((s) => s.opacity(1))
+    return v_flex().id("history-conversation-map").w(24).flex_none().h_full().py(10).items_center().justify_center()
+      .border_l(1).border_color(t.border).bg(t.chrome)
       .tooltip("会话地图")
       .children(turns.map((i, k) => {
         const on = k === current;
         const text = (messages[i].text || "").replace(/\s+/g, " ").trim();
         const title = text.length > 28 ? `${text.slice(0, 28)}…` : (text || `第 ${k + 1} 轮`);
         const tip = `Turn ${k + 1}/${turns.length} · ${title}${text.length > 28 ? `\n${text.slice(0, 120)}${text.length > 120 ? "…" : ""}` : ""}`;
-        return div().id(`turn-${k}`).w_full().flex_1().min_h(4).max_h(14).flex().items_center().justify_center().cursor_pointer()
+        return div().id(`turn-${k}`).w_full().flex_1().min_h(6).max_h(16).flex().items_center().justify_center().cursor_pointer()
           .on_click((_e, cx) => { this.start = k === 0 ? 0 : i; this.top = i; cx.notify(); })
           .tooltip(tip)
           .child(div().flex_none().rounded(99).h(on ? 3 : 2)
-            .w(on ? 16 : 10).bg(on ? t.foreground : t.dim)
-            .hover((s) => s.w(16).bg(t.foreground).opacity(0.75)));
+            .w(on ? 18 : 11).bg(on ? t.accent : t.muted)
+            .hover((s) => s.w(18).bg(t.accent)));
       }));
   }
 
