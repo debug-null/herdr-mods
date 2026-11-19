@@ -158,9 +158,6 @@ export default class History extends View {
     this.host = null; // which machine the current index was built for
     this.repo = null; this.stale = false; this.loadingLabel = null;
     this.shown = PAGE; // how many filtered sessions to render (grows via 加载更多)
-    this.view = localStorage.getItem("history.view") === "map" ? "map" : "list"; // 列表 | 会话地图
-    try { this.mapFolded = new Set(JSON.parse(localStorage.getItem("history.mapFolded") ?? "[]")); }
-    catch { this.mapFolded = new Set(); }
     this._refreshGen = 0; this._repoGen = 0;
     // Turn rail state: `start` is the first message shown (a jump to a prompt
     // starts the transcript there), `top` the message at the top of the view.
@@ -217,47 +214,6 @@ export default class History extends View {
     setShared(PIN_STORE, map);
     this._visKey = null;
     cx.notify();
-  }
-
-  setView(view, cx) {
-    if (this.view === view) return;
-    this.view = view;
-    localStorage.setItem("history.view", view);
-    cx.notify();
-  }
-
-  toggleMapFold(cwdKey, cx) {
-    if (this.mapFolded.has(cwdKey)) this.mapFolded.delete(cwdKey);
-    else this.mapFolded.add(cwdKey);
-    localStorage.setItem("history.mapFolded", JSON.stringify([...this.mapFolded]));
-    cx.notify();
-  }
-
-  // Project atlas: group filtered sessions by cwd, newest project first.
-  mapGroups(sessions) {
-    const groups = new Map();
-    for (const s of sessions) {
-      const key = s.cwd || "";
-      let g = groups.get(key);
-      if (!g) {
-        g = { key, cwd: s.cwd || null, sessions: [], latest: 0, pins: 0 };
-        groups.set(key, g);
-      }
-      g.sessions.push(s);
-      g.latest = Math.max(g.latest, s.updated || 0);
-      if (isPinned(s)) g.pins += 1;
-    }
-    for (const g of groups.values()) {
-      g.sessions.sort((a, b) => {
-        const pa = isPinned(a), pb = isPinned(b);
-        if (pa !== pb) return pa ? -1 : 1;
-        return (b.updated || 0) - (a.updated || 0);
-      });
-    }
-    return [...groups.values()].sort((a, b) => {
-      if ((b.pins > 0) !== (a.pins > 0)) return b.pins > 0 ? 1 : -1;
-      return b.latest - a.latest;
-    });
   }
 
   applyCache(host) {
@@ -679,14 +635,10 @@ export default class History extends View {
                 : this.scope === "global" ? `近 ${GLOBAL_DAYS} 天没有会话`
                   : "没有会话");
     const pathHint = this.scope === "repo" ? (this.repo || this.root) : this.root;
-    const map = this.view === "map";
-    const groups = map ? this.mapGroups(all) : [];
     return v_flex().size_full().min_h(0)
       .child(this.header(t, [
         div().font_semibold().child("历史"),
         div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${all.length}`),
-        this.chip("view-list", "列表", !map, t, (_e, cx) => this.setView("list", cx)),
-        this.chip("view-map", "地图", map, t, (_e, cx) => this.setView("map", cx)),
         div().flex_1(),
         this.chip("scope-here", "本目录", this.scope === "here", t, (_e, cx) => this.setFilter("scope", "here", cx)),
         this.chip("scope-repo", "本仓库", this.scope === "repo", t, (_e, cx) => this.setFilter("scope", "repo", cx)),
@@ -711,35 +663,10 @@ export default class History extends View {
           .children(present.map((a) => this.chip(`agent-${a}`, `${AGENTS[a].name} ${counts[a]}`, this.agent === a, t,
             (_e, cx) => this.setFilter("agent", this.agent === a ? "all" : a, cx), this.icon(a, 13, t))))
           .when(orphanCount > 0, (el) => el.child(div().text_size(11).text_color(t.dim).px(4).child(`未归属 ${orphanCount}`)))))
-      .when(!map, (el) => el.child(v_flex().id("history-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
+      .child(v_flex().id("history-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
         .when(!rows.length, (row) => row.child(div().p(8).text_color(t.dim).child(empty)))
         .children(rows.map((s) => this.sessionRow(s, t)))
-        .when(more > 0, (row) => row.child(this.moreRow(rows.length, all.length, t)))))
-      .when(map, (el) => el.child(v_flex().id("history-map").flex_1().min_h(0).overflow_y_scrollbar().p(8).gap(8)
-        .when(!groups.length, (g) => g.child(div().p(8).text_color(t.dim).child(empty)))
-        .children(groups.map((g) => this.mapProject(g, t)))));
-  }
-
-  mapProject(group, t) {
-    const homePath = this.home;
-    const label = group.cwd ? short(group.cwd, homePath) : "未归属";
-    const folded = this.mapFolded.has(group.key);
-    const agents = [...new Set(group.sessions.map((s) => s.agent))];
-    return v_flex().id(`map-${group.key || "orphan"}`).flex_none().rounded(10).border_1().border_color(t.border).bg(t.chrome).overflow_hidden
-      .child(h_flex().id(`map-head-${group.key || "orphan"}`).h(36).px(10).gap(8).items_center().cursor_pointer()
-        .hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => this.toggleMapFold(group.key, cx))
-        .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(12).flex_none().text_color(t.dim))
-        .child(svg("mods/workspace-chrome/folder.svg").size(13).flex_none().text_color(t.muted))
-        .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(label))
-        .child(h_flex().flex_none().gap(3).items_center()
-          .children(agents.slice(0, 4).map((a) => this.icon(a, 12, t)))
-          .when(agents.length > 4, (el) => el.child(div().text_size(10).text_color(t.dim).child(`+${agents.length - 4}`))))
-        .child(div().flex_none().text_size(11).text_color(t.dim).child(`${group.sessions.length}`))
-        .when(group.pins > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.accent).child(`★${group.pins}`)))
-        .child(div().flex_none().text_size(11).text_color(t.dim).child(ago(group.latest))))
-      .when(!folded, (el) => el.child(v_flex().px(6).pb(6).gap(2)
-        .children(group.sessions.map((s) => this.sessionRow(s, t)))));
+        .when(more > 0, (row) => row.child(this.moreRow(rows.length, all.length, t))));
   }
 
   message(m, i, t) {
@@ -791,10 +718,10 @@ export default class History extends View {
       .when(Boolean(tr?.messages.length), (el) => el.child(this.renderTranscript(tr.messages, t)));
   }
 
-  // The transcript, with a rail on the right: one dot per prompt you sent.
-  // Hover a dot for the prompt; click it to read from there. The lazy list
-  // can't be scrolled from code, so a jump starts the list at that prompt
-  // (a fresh list id) and a bar above it brings back what came before.
+  // Conversation map: right-edge tick rail, one short bar per user turn.
+  // Hover for the prompt; click jumps the transcript to that turn. The lazy
+  // list can't scroll from code, so a jump starts the list there (fresh list
+  // id) and a bar above brings earlier messages back.
   renderTranscript(messages, t) {
     const turns = [];
     messages.forEach((m, i) => { if (m.role === "user") turns.push(i); });
@@ -814,7 +741,6 @@ export default class History extends View {
           .on_click((_e, cx) => { this.start = 0; this.top = 0; cx.notify(); })
           .child(`↑ 显示更早的 ${start} 条`)))
         .child(div().id(`${id}-box`).relative().flex_1().min_h(0)
-          // The wheel moves the list itself; render again once it has, so the lit dot follows.
           .on_scroll_wheel((_e, cx) => { cx.notify(); cx.timer.after(50, (cx) => cx.notify()); })
           .child(list(id, shown, (i) => `m${start + i}`, (i) => {
             const at = start + i;
@@ -822,18 +748,25 @@ export default class History extends View {
             return div().w_full().pt(i === 0 ? 12 : 0).pb(i === shown - 1 ? 12 : 10).child(this.message(messages[at], at, t));
           }).size_full())
           .child(Scrollbar.vertical(id).absolute().inset_0())))
-      .when(turns.length > 1, (el) => el.child(this.turnRail(turns, messages, current, t)));
+      .when(turns.length > 0, (el) => el.child(this.conversationMap(turns, messages, current, t)));
   }
 
-  turnRail(turns, messages, current, t) {
-    return v_flex().id("history-turns").w(18).flex_none().h_full().py(10).items_center().justify_center().border_l(1).border_color(t.border)
+  // Conversation map — CodeBridge-style: vertical rail of short horizontal ticks.
+  conversationMap(turns, messages, current, t) {
+    return v_flex().id("history-conversation-map").w(22).flex_none().h_full().py(12).items_center().justify_center()
+      .opacity(0.45).hover((s) => s.opacity(1))
+      .tooltip("会话地图")
       .children(turns.map((i, k) => {
-        const on = k === current, text = messages[i].text.replace(/\s+/g, " ").trim();
-        return div().id(`turn-${k}`).w_full().flex_1().min_h(3).max_h(18).flex().items_center().justify_center().cursor_pointer()
-          .rounded(4).hover((s) => s.bg(t.hover))
-          .tooltip(`${k + 1}/${turns.length} · ${text.length > 120 ? text.slice(0, 120) + "…" : text}`)
+        const on = k === current;
+        const text = (messages[i].text || "").replace(/\s+/g, " ").trim();
+        const title = text.length > 28 ? `${text.slice(0, 28)}…` : (text || `第 ${k + 1} 轮`);
+        const tip = `Turn ${k + 1}/${turns.length} · ${title}${text.length > 28 ? `\n${text.slice(0, 120)}${text.length > 120 ? "…" : ""}` : ""}`;
+        return div().id(`turn-${k}`).w_full().flex_1().min_h(4).max_h(14).flex().items_center().justify_center().cursor_pointer()
           .on_click((_e, cx) => { this.start = k === 0 ? 0 : i; this.top = i; cx.notify(); })
-          .child(div().flex_none().rounded(4).when(on, (d) => d.size(8).bg(t.accent)).when(!on, (d) => d.size(5).bg(t.dim)));
+          .tooltip(tip)
+          .child(div().flex_none().rounded(99).h(on ? 3 : 2)
+            .w(on ? 16 : 10).bg(on ? t.foreground : t.dim)
+            .hover((s) => s.w(16).bg(t.foreground).opacity(0.75)));
       }));
   }
 
