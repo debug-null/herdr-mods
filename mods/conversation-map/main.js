@@ -137,14 +137,14 @@ export default class ConversationMap extends View {
     this.refresh(cx);
   }
 
-  // Stay on this tab's agent. Normal click: highlight + scroll this terminal only.
-  // Shift-click: also open History at that turn (explicit).
-  jumpTo(k, e, cx) {
+  // Claude/Codex TUI is an alternate screen: Herdr scrollback has no per-turn
+  // chat records. Turns live in the session transcript — open History there.
+  // Never agent.focus (that switches spaces).
+  jumpTo(k, _e, cx) {
     const target = this.target;
     const turn = this.turns[k];
     if (!target?.address || !turn) return;
 
-    // Re-check we're still on the same space/tab — never act on a stale target.
     const live = targetAgent();
     if (!sameSlot(live, target)) {
       notify({ title: "会话地图", body: "当前 Tab 的 Agent 已切换，已刷新地图", level: "warn", timeout: 2500 });
@@ -155,45 +155,40 @@ export default class ConversationMap extends View {
     this.active = k;
     cx.notify();
 
-    const n = Math.max(1, this.turns.length);
-    if (k <= 0) run("terminal.scroll", { to: "top", terminal: target.address });
-    else if (k >= n - 1) run("terminal.scroll", { to: "bottom", terminal: target.address });
-    else {
-      run("terminal.scroll", { to: "top", terminal: target.address });
-      const pages = Math.max(0.5, (k / (n - 1)) * 12);
-      cx.timer.after(80, () => run("terminal.scroll", { pages, terminal: target.address }));
+    if (!this.session?.file) {
+      notify({
+        title: "会话地图",
+        body: "终端里没有轮次记录（TUI 全屏缓冲）。本会话 transcript 也还没对上。",
+        level: "warn",
+        timeout: 4000,
+      });
+      return;
     }
 
-    const label = (turn.text || `第 ${k + 1} 轮`).slice(0, 80);
-    const shift = Boolean(e?.modifiers?.shift || e?.shift);
-    if (shift && this.session?.file) {
-      const needle = (turn.text || "").replace(/\s+/g, " ").trim();
-      setShared("history.jump", {
-        at: Date.now(),
-        host: this.session._host || target.machine || "local",
-        agent: this.session.agent,
-        id: this.session.id,
-        file: this.session.file,
-        cwd: this.session.cwd || target.cwd || null,
-        title: this.session.title || "",
-        turns: this.session.turns || this.turns.length,
-        updated: this.session.updated || Date.now(),
-        created: this.session.created || Date.now(),
-        _home: this.session._home || null,
-        turn: k,
-        needle: /^第 \d+ 轮$/.test(needle) ? null : needle.slice(0, 80),
-      });
-      run("layout.select", { stack: "panel-body", child: "history" });
-      run("layout.show", { id: "panel" });
-      notify({ title: "会话地图", body: `History · 第 ${k + 1}/${this.turns.length} 轮`, level: "info", timeout: 2000 });
-    } else {
-      notify({
-        title: `${target.title || target.kind} · 第 ${k + 1}/${this.turns.length} 轮`,
-        body: label || "（无摘要）",
-        level: "info",
-        timeout: 3500,
-      });
-    }
+    const needle = (turn.text || "").replace(/\s+/g, " ").trim();
+    setShared("history.jump", {
+      at: Date.now(),
+      host: this.session._host || target.machine || "local",
+      agent: this.session.agent,
+      id: this.session.id,
+      file: this.session.file,
+      cwd: this.session.cwd || target.cwd || null,
+      title: this.session.title || target.title || "",
+      turns: this.session.turns || this.turns.length,
+      updated: this.session.updated || Date.now(),
+      created: this.session.created || Date.now(),
+      _home: this.session._home || null,
+      turn: k,
+      needle: /^第 \d+ 轮$/.test(needle) ? null : needle.slice(0, 80),
+    });
+    run("layout.select", { stack: "panel-body", child: "history" });
+    run("layout.show", { id: "panel" });
+    notify({
+      title: "会话地图",
+      body: `第 ${k + 1}/${this.turns.length} 轮 · 已在 History 打开本会话（终端 TUI 里没有可定位的轮次）`,
+      level: "info",
+      timeout: 3500,
+    });
   }
 
   async historyExec(machine, args) {
@@ -322,7 +317,7 @@ export default class ConversationMap extends View {
     }
     return v_flex().id("conversation-map").size_full().py(8).items_center().justify_center()
       .bg(t.background).border_1().border_color(t.border).rounded(10)
-      .tooltip(`会话地图 · ${shown.title || shown.kind} · ${turns.length} 轮\n点击定位本会话；Shift+点击打开 History`)
+      .tooltip(`会话地图 · ${shown.title || shown.kind} · ${turns.length} 轮\n点击在 History 打开本会话该轮（终端 TUI 无轮次滚动）`)
       .children(turns.map((turn, k) => {
         const on = k === this.active;
         const title = turn.text.length > 28 ? `${turn.text.slice(0, 28)}…` : (turn.text || `第 ${k + 1} 轮`);
