@@ -154,6 +154,13 @@
                       "content": {
                         "mod": "web"
                       }
+                    },
+                    {
+                      "id": "actions",
+                      "type": "block",
+                      "content": {
+                        "mod": "actions"
+                      }
                     }
                   ],
                   "active": "files"

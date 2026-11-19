@@ -78,7 +78,7 @@ export default class Tabs extends View {
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
     // History is always offered; Files/Changes follow the welcome's choice.
-    const enabled = [...(shared("workspace.panels") ?? ["files", "changes"]), "history", "web"];
+    const enabled = [...(shared("workspace.panels") ?? ["files", "changes"]), "history", "web", "actions"];
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon) => {
       const on = panel && !panel.hidden && body?.active === id;
@@ -105,6 +105,7 @@ export default class Tabs extends View {
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "更改", "mods/changes/changes.svg")))
       .when(enabled.includes("history") && Boolean(find(root, "history")), el => el.child(panelButton("history", "历史", "mods/history/history.svg")))
       .when(enabled.includes("web") && Boolean(find(root, "web")), el => el.child(panelButton("web", "网页", "mods/web/globe.svg")))
+      .when(enabled.includes("actions") && Boolean(find(root, "actions")), el => el.child(panelButton("actions", "动作", "mods/workspace-chrome/terminal.svg")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-history/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs-history/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs-history/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

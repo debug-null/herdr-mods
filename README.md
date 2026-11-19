@@ -11,6 +11,7 @@ Previously published alone: [`herdr-open-in-editor`](https://github.com/debug-nu
 | `mods/history` | Agent session history (Claude/Codex/Cursor/Devin/…), multi-machine |
 | `mods/open-in-editor` | Open current space in Cursor / VS Code / Zed / … |
 | `mods/spaces` | Sidebar spaces with project favicon/logo + letter fallback |
+| `mods/actions` | Saved shell actions panel (persisted to `actions.json`) |
 | `mods/tabs-history` | Tabs bar with History / Editor entry points |
 | `mods/better-alerts` | macOS-friendly agent alerts |
 | `mods/changes-scm` | SCM-oriented changes pane |
