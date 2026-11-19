@@ -612,14 +612,20 @@ export default class History extends View {
     const rows = all.slice(0, limit);
     const more = all.length - rows.length;
     const counts = {};
+    const latest = {}; // agent -> newest session updated (for chip order)
     let orphanCount = 0;
     for (const s of this.sessions) {
-      if (this.scope === "global" && !inGlobalWindow(s)) continue;
+      if (this.scope === "global" && !inGlobalWindow(s) && !isPinned(s)) continue;
       if (!s.cwd) orphanCount += 1;
-      if (inScope(s, this.scope, this.root, this.repo)) counts[s.agent] = (counts[s.agent] ?? 0) + 1;
+      if (inScope(s, this.scope, this.root, this.repo) || isPinned(s)) {
+        counts[s.agent] = (counts[s.agent] ?? 0) + 1;
+        latest[s.agent] = Math.max(latest[s.agent] || 0, s.updated || 0);
+      }
     }
     if (this.scope !== "all" && this.scope !== "global") orphanCount = 0;
-    const present = Object.keys(AGENTS).filter((a) => counts[a]);
+    // Chips: whichever agent has the newest session floats first (Codex today, Devin tomorrow…).
+    const present = Object.keys(AGENTS).filter((a) => counts[a])
+      .sort((a, b) => (latest[b] || 0) - (latest[a] || 0));
     const empty = this.error
       || (this.loading && !this.sessions.length ? (this.loadingLabel || "正在加载会话…")
         : this.scope !== "all" && this.scope !== "global" && !this.root ? "无当前目录"
