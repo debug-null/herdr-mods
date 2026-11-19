@@ -3,9 +3,9 @@
 // sign-ins into the browser, picked from a searchable, tickable list of sites.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Checkbox } from "gpui-base";
-import { exec, notify, theme } from "herdr";
+import { exec, notify, theme, home } from "herdr";
 
-const BIN = "/Users/user/.config/herdr/plugins/github/herdr-web-browser-c3ad05caf350/target/release/herdr-web-browser";
+const BIN = `${home()}/.config/herdr/plugins/github/herdr-web-browser-c3ad05caf350/target/release/herdr-web-browser`;
 
 export default class Settings extends View {
   init(_props, cx) {

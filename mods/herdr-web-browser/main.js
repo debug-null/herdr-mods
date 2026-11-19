@@ -2,9 +2,9 @@
 // herdr-web-browser menu (mod.open:herdr-web-browser): acts for the agent that had focus.
 import { View, div } from "gpui-kit";
 import { v_flex } from "gpui-base";
-import { exec, agents, focused, props, closeOverlay, notify, theme, run } from "herdr";
+import { exec, agents, focused, props, closeOverlay, notify, theme, run, home } from "herdr";
 
-const BIN = "/Users/user/.config/herdr/plugins/github/herdr-web-browser-c3ad05caf350/target/release/herdr-web-browser";
+const BIN = `${home()}/.config/herdr/plugins/github/herdr-web-browser-c3ad05caf350/target/release/herdr-web-browser`;
 
 export default class Browser extends View {
   init(_props, _cx) {

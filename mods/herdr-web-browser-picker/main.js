@@ -2,9 +2,9 @@
 // Opened by herdr-web-browser when a send has no obvious target; the choice becomes sticky.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, agents, props, closeOverlay, theme } from "herdr";
+import { exec, agents, props, closeOverlay, theme, home } from "herdr";
 
-const BIN = "/Users/user/.config/herdr/plugins/github/herdr-web-browser-c3ad05caf350/target/release/herdr-web-browser";
+const BIN = `${home()}/.config/herdr/plugins/github/herdr-web-browser-c3ad05caf350/target/release/herdr-web-browser`;
 
 export default class Picker extends View {
   init(_props, _cx) {

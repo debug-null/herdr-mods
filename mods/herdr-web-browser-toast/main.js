@@ -1,9 +1,9 @@
 // @ts-check
 // The CLI can't post desktop notifications; it stashes one and opens this, which posts it and closes.
 import { View, div } from "gpui-kit";
-import { exec, props, closeOverlay, notify } from "herdr";
+import { exec, props, closeOverlay, notify, home } from "herdr";
 
-const BIN = "/Users/user/.config/herdr/plugins/github/herdr-web-browser-c3ad05caf350/target/release/herdr-web-browser";
+const BIN = `${home()}/.config/herdr/plugins/github/herdr-web-browser-c3ad05caf350/target/release/herdr-web-browser`;
 
 export default class Toast extends View {
   init(_props, cx) {
