@@ -551,21 +551,6 @@ export default class History extends View {
     return matched;
   }
 
-  // Mini Conversation map on the session list: one short tick per turn (capped).
-  rowMap(turns, t) {
-    const n = Math.max(0, Number(turns) || 0);
-    const shown = Math.min(n, 10);
-    if (shown < 1) return div().w(14).flex_none();
-    return v_flex().id("session-map").w(14).flex_none().h(30).justify_center().items_center().gap(2)
-      .tooltip(`会话地图 · ${n} 轮`)
-      .children(Array.from({ length: shown }, (_, k) => {
-        const last = k === shown - 1;
-        return div().flex_none().rounded(99).h(2).w(last ? 12 : 8)
-          .bg(last ? t.foreground : t.muted)
-          .opacity(last ? 1 : 0.55);
-      }));
-  }
-
   sessionRow(s, t) {
     const key = `${sessionHost(s)}-${s.agent}-${s.id}`;
     const hot = this.hot === key;
@@ -593,7 +578,6 @@ export default class History extends View {
           .child(div().flex_none().child(`· ${s.turns} 次提问`))
           .when(this.scope === "global" || pinned, (el) => el.child(div().flex_none().child(`· ${hostLabel(sessionHost(s))}`)))
           .when(showWhere, (el) => el.child(div().min_w(0).truncate().child(`· ${s.cwd ? short(s.cwd, homePath) : "未归属"}`)))))
-      .child(this.rowMap(s.turns, t))
       .when(Boolean(AGENTS[s.agent]?.resume), (el) => el.child(this.quickResume(s, hot, t)));
   }
 
