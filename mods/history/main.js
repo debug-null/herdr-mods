@@ -19,6 +19,7 @@ const TOOL_LINES = 6;
 const PAGE = 100; // sessions shown per "加载更多"
 const GLOBAL_DAYS = 3; // 全局默认只看最近几天，避免跨机器列表过长
 const STORE = "history.index";
+const PIN_STORE = "history.pins"; // { "host\\0agent\\0id": { at } } — survives restart
 const CACHE_TTL_MS = 60_000;
 const BG_REFRESH_MS = 45_000;
 const SCRIPT_SYNC = "history.script";
@@ -104,6 +105,19 @@ function sessionMachine(session) {
   return host === "local" ? null : host;
 }
 
+function pinKey(session) {
+  return `${sessionHost(session)}\0${session?.agent || ""}\0${session?.id || ""}`;
+}
+
+function pinMap() {
+  const value = shared(PIN_STORE);
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function isPinned(session) {
+  return Boolean(pinMap()[pinKey(session)]);
+}
+
 function ago(ms) {
   if (!ms) return "";
   const s = Math.max(0, (Date.now() - ms) / 1000);
@@ -176,18 +190,30 @@ export default class History extends View {
     cx.notify();
   }
 
-  // Filter once per (sessions, scope, agent, query, roots) — render calls this a lot.
+  // Filter once per (sessions, scope, agent, query, roots, pins) — render calls this a lot.
   filtered() {
+    const pins = pinMap();
     const key = [
       this.host, this.agent, this.scope, this.root || "", this.repo || "",
       this.query, this.sessions.length,
       this.sessions[0]?.id || "", this.sessions[this.sessions.length - 1]?.updated || 0,
+      Object.keys(pins).sort().join(","),
     ].join("\0");
     if (this._visKey === key && this._visRef === this.sessions) return this._vis;
     this._visKey = key;
     this._visRef = this.sessions;
     this._vis = this.visible();
     return this._vis;
+  }
+
+  togglePin(session, cx) {
+    const map = { ...pinMap() };
+    const key = pinKey(session);
+    if (map[key]) delete map[key];
+    else map[key] = { at: Date.now() };
+    setShared(PIN_STORE, map);
+    this._visKey = null;
+    cx.notify();
   }
 
   applyCache(host) {
@@ -486,42 +512,71 @@ export default class History extends View {
       .when(hot, (el) => el.child("继续"));
   }
 
+  matchesQuery(s, q) {
+    if (!q) return true;
+    const label = hostLabel(sessionHost(s)).toLowerCase();
+    return (
+      s.title.toLowerCase().includes(q) ||
+      (s.cwd ?? "").toLowerCase().includes(q) ||
+      label.includes(q) ||
+      sessionHost(s).toLowerCase().includes(q) ||
+      (!s.cwd && "未归属".includes(q))
+    );
+  }
+
   visible() {
     const q = this.query.trim().toLowerCase();
-    return this.sessions.filter((s) => {
+    const pins = pinMap();
+    const matched = this.sessions.filter((s) => {
       if (this.agent !== "all" && s.agent !== this.agent) return false;
       if (!inScope(s, this.scope, this.root, this.repo)) return false;
-      if (this.scope === "global" && !inGlobalWindow(s)) return false;
-      if (!q) return true;
-      const label = hostLabel(sessionHost(s)).toLowerCase();
-      return (
-        s.title.toLowerCase().includes(q) ||
-        (s.cwd ?? "").toLowerCase().includes(q) ||
-        label.includes(q) ||
-        sessionHost(s).toLowerCase().includes(q) ||
-        (!s.cwd && "未归属".includes(q))
-      );
+      if (this.scope === "global" && !inGlobalWindow(s) && !pins[pinKey(s)]) return false;
+      return this.matchesQuery(s, q);
     });
+    // Pinned sessions stay findable: show them even outside 本目录 / 近3天.
+    const seen = new Set(matched.map((s) => pinKey(s)));
+    for (const s of this.sessions) {
+      if (!pins[pinKey(s)] || seen.has(pinKey(s))) continue;
+      if (this.agent !== "all" && s.agent !== this.agent) continue;
+      if (!this.matchesQuery(s, q)) continue;
+      matched.push(s);
+      seen.add(pinKey(s));
+    }
+    matched.sort((a, b) => {
+      const pa = pins[pinKey(a)], pb = pins[pinKey(b)];
+      if (Boolean(pa) !== Boolean(pb)) return pa ? -1 : 1;
+      if (pa && pb) return (pb.at || 0) - (pa.at || 0);
+      return (b.updated || 0) - (a.updated || 0);
+    });
+    return matched;
   }
 
   sessionRow(s, t) {
     const key = `${sessionHost(s)}-${s.agent}-${s.id}`;
     const hot = this.hot === key;
+    const pinned = isPinned(s);
     const homePath = s._home || this.home;
-    const showWhere = this.scope === "global" || this.scope === "all" || !s.cwd;
-    return h_flex().id(`session-${key}`).flex_none().px(8).py(7).gap(10).items_center().rounded(8).cursor_pointer()
+    const showWhere = this.scope === "global" || this.scope === "all" || !s.cwd || pinned;
+    return h_flex().id(`session-${key}`).flex_none().px(8).py(7).gap(8).items_center().rounded(8).cursor_pointer()
       .hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.show(s, cx))
       .on_hover((hovered, cx) => {
         if (hovered) this.hot = key; else if (this.hot === key) this.hot = null;
         cx.notify();
       })
+      .child(div().id(`pin-${key}`).size(22).flex_none().flex().items_center().justify_center().rounded(5)
+        .cursor_pointer().text_size(12).text_color(pinned ? t.accent : t.dim)
+        .hover((st) => st.bg(t.hover).text_color(t.foreground))
+        .tooltip(pinned ? "取消置顶" : "置顶（重启仍在）")
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { cx.stop_propagation(); this.togglePin(s, cx); })
+        .child(pinned ? "★" : "☆"))
       .child(this.icon(s.agent, 16, t))
       .child(v_flex().flex_1().min_w(0).gap(2)
         .child(div().text_size(12.5).truncate().child(s.title || "(untitled)"))
         .child(h_flex().gap(6).text_size(11).text_color(t.dim)
           .child(div().flex_none().child(ago(s.updated)))
           .child(div().flex_none().child(`· ${s.turns} 次提问`))
-          .when(this.scope === "global", (el) => el.child(div().flex_none().child(`· ${hostLabel(sessionHost(s))}`)))
+          .when(this.scope === "global" || pinned, (el) => el.child(div().flex_none().child(`· ${hostLabel(sessionHost(s))}`)))
           .when(showWhere, (el) => el.child(div().min_w(0).truncate().child(`· ${s.cwd ? short(s.cwd, homePath) : "未归属"}`)))))
       .when(Boolean(AGENTS[s.agent]?.resume), (el) => el.child(this.quickResume(s, hot, t)));
   }
@@ -627,6 +682,7 @@ export default class History extends View {
 
   renderSession(t) {
     const s = this.open, a = AGENTS[s.agent], can = Boolean(a?.resume);
+    const pinned = isPinned(s);
     const tr = this.transcript;
     const homePath = s._home || this.home;
     return v_flex().size_full().min_h(0)
@@ -635,6 +691,12 @@ export default class History extends View {
           .hover((st) => st.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { this.open = null; this.transcript = null; cx.notify(); }).child("‹"),
         this.icon(s.agent, 16, t),
         div().flex_1().min_w(0).font_semibold().truncate().child(s.title || "(untitled)"),
+        div().id("history-pin").size(28).flex_none().flex().items_center().justify_center().rounded(7).cursor_pointer()
+          .text_size(14).text_color(pinned ? t.accent : t.dim)
+          .hover((st) => st.bg(t.hover).text_color(t.foreground))
+          .tooltip(pinned ? "取消置顶" : "置顶（重启仍在）")
+          .on_click((_e, cx) => this.togglePin(s, cx))
+          .child(pinned ? "★" : "☆"),
       ]))
       .child(h_flex().flex_none().px(14).py(8).gap(8).items_center().border_b(1).border_color(t.border).text_size(11).text_color(t.dim)
         .child(v_flex().flex_1().min_w(0).gap(2)
