@@ -94,7 +94,7 @@ export default class WorkspaceStatus extends View {
       });
       tip = `${name} 剩余 · ` + u.windows.map((w) => `${w.label}窗口 ${untilText(w.resetsAt)}后重置`).join(" · ") + "（点击刷新）";
     }
-    return h_flex().id(`quota-${key}`).gap(4).items_center().tooltip(tip)
+    return h_flex().id(`quota-${key}`).gap(4).items_center().cursor_pointer().tooltip(tip)
       .on_click((_e, cx) => this.refresh(cx))
       .child(div().text_color(t.foreground).child(name))
       .children(body);
@@ -114,6 +114,6 @@ export default class WorkspaceStatus extends View {
       .child(div().flex_1())
       .child(this.quota(t, "claude", "Claude"))
       .child(this.quota(t, "codex", "Codex"))
-      .child(div().id("palette").text_color(t.dim).on_click(() => run("app.palette")).child(this.hint(t)));
+      .child(div().id("palette").text_color(t.dim).cursor_pointer().on_click(() => run("app.palette")).child(this.hint(t)));
   }
 }
