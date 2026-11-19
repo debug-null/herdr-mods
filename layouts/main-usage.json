@@ -120,6 +120,18 @@
               }
             },
             {
+              "id": "conversation-map",
+              "type": "block",
+              "content": {
+                "mod": "conversation-map"
+              },
+              "size": {
+                "px": 28
+              },
+              "min": 24,
+              "max": 36
+            },
+            {
               "id": "panel",
               "type": "column",
               "children": [
