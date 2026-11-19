@@ -1,0 +1,15 @@
+{
+  "programs": {
+    "herdr-web-browser": {
+      "name": "Browser",
+      "icon": "mods/herdr-web-browser/icon.svg",
+      "tint": true,
+      "tile": "#1a73e8",
+      "color": "#ffffff",
+      "run": [
+        "REPLACE_WITH_LOCAL_herdr-web-browser_BINARY",
+        "menu-open"
+      ]
+    }
+  }
+}

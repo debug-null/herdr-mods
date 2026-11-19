@@ -1,0 +1,7 @@
+.DS_Store
+**/gpui-kit.d.ts
+**/jsconfig.json
+**/__pycache__/
+**/*.pyc
+*.sock
+.cache/
