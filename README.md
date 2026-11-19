@@ -8,7 +8,7 @@ Previously published alone: [`herdr-open-in-editor`](https://github.com/debug-nu
 
 | Path | Notes |
 |------|--------|
-| `mods/history` | Agent session history (Claude/Codex/Cursor/…), multi-machine |
+| `mods/history` | Agent session history (Claude/Codex/Cursor/Devin/…), multi-machine |
 | `mods/open-in-editor` | Open current space in Cursor / VS Code / Zed / … |
 | `mods/spaces` | Sidebar spaces with project favicon/logo + letter fallback |
 | `mods/tabs-history` | Tabs bar with History / Editor entry points |

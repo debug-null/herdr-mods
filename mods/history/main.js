@@ -11,6 +11,7 @@ const AGENTS = {
   cursor: { name: "Cursor", icon: "icons/cursor.svg", tint: false, resume: (s) => ["cursor", "agent", "--resume", s.id] },
   opencode: { name: "OpenCode", icon: "icons/opencode.svg", tint: false, resume: (s) => ["opencode", "--session", s.id] },
   antigravity: { name: "Antigravity", icon: "icons/antigravity.svg", tint: false, resume: (s) => ["agy", "--conversation", s.id] },
+  devin: { name: "Devin", icon: "icons/devin.png", tint: false, resume: (s) => ["devin", "--resume", s.id] },
 };
 const SCRIPT = () => `${appHome()}/mods/history/history.py`;
 const REMOTE_SCRIPT_EXPR = '"$HOME/.config/herdr-app/mods/history/history.py"';

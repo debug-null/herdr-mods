@@ -4,7 +4,7 @@
   history.py list [--cwd PATH]  -> JSON array of sessions, newest first
   history.py show AGENT REF     -> JSON array of messages for one session
 
-Sources: Claude Code, Codex, Pi, Cursor, OpenCode, Antigravity.
+Sources: Claude Code, Codex, Pi, Cursor, OpenCode, Antigravity, Devin.
 Per-file (and per-db) results are cached by (mtime, size) so a refresh only
 re-reads transcripts that changed. --cwd keeps sessions related to PATH
 (session under path, path under session, or missing cwd).
@@ -19,10 +19,11 @@ from urllib.parse import unquote, urlparse
 
 HOME = os.path.expanduser("~")
 CACHE = os.path.join(HOME, ".cache", "herdr-history", "index.json")
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 TITLE_MAX = 160
 TEXT_MAX = 6000
 SHOW_MAX = 400
+_DEVIN_CWD = re.compile(r"Current workspace directories:\s*\n\s+(.+?) \(cwd\)")
 
 
 def clip(text, n):
@@ -698,6 +699,73 @@ def antigravity_show(ref):
     return out
 
 
+# ---------- Devin (ATIF transcripts under ~/.local/share/devin/cli/transcripts) ----------
+
+def devin_message_text(message):
+    if isinstance(message, str):
+        return message
+    if isinstance(message, list):
+        return "\n".join(
+            p.get("text", "") for p in message
+            if isinstance(p, dict) and p.get("type", "text") == "text" and p.get("text")
+        )
+    return ""
+
+
+def devin_index(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    sid = data.get("session_id") or os.path.splitext(os.path.basename(path))[0]
+    cwd = first = None
+    created = updated = turns = 0
+    for step in data.get("steps") or []:
+        ts = ms(step.get("timestamp"))
+        updated = max(updated, ts)
+        if not created and ts:
+            created = ts
+        src = step.get("source")
+        text = devin_message_text(step.get("message"))
+        if src == "system" and not cwd:
+            m = _DEVIN_CWD.search(text or "")
+            if m:
+                cwd = m.group(1)
+        elif src == "user":
+            if text and not noise(text):
+                turns += 1
+                first = first or text
+    if not turns:
+        return None
+    return {"agent": "devin", "id": sid, "file": path, "cwd": cwd, "created": created,
+            "updated": updated, "turns": turns, "title": clip(first, TITLE_MAX)}
+
+
+def devin_show(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    out = []
+    for step in data.get("steps") or []:
+        src = step.get("source")
+        if src not in ("user", "agent"):
+            continue
+        role = "user" if src == "user" else "assistant"
+        text = devin_message_text(step.get("message"))
+        if not text:
+            continue
+        if role == "user" and noise(text):
+            continue
+        # System-injected blobs sometimes land as agent/user with angle brackets.
+        if text.lstrip().startswith("<"):
+            continue
+        out.append({"role": role, "text": text, "time": ms(step.get("timestamp"))})
+    return out
+
+
 # ---------- driver ----------
 
 def file_sources():
@@ -711,6 +779,8 @@ def file_sources():
         yield "pi", f
     for f in glob.glob(os.path.join(HOME, ".cursor", "projects", "*", "agent-transcripts", "*", "*.jsonl")):
         yield "cursor", f
+    for f in glob.glob(os.path.join(HOME, ".local", "share", "devin", "cli", "transcripts", "*.json")):
+        yield "devin", f
 
 
 def index_file(agent, path):
@@ -722,6 +792,8 @@ def index_file(agent, path):
         return pi_index(path)
     if agent == "cursor":
         return cursor_index(path)
+    if agent == "devin":
+        return devin_index(path)
     return None
 
 
@@ -818,6 +890,8 @@ def cmd_show(agent, ref):
         msgs = opencode_show(ref)
     elif agent == "antigravity":
         msgs = antigravity_show(ref)
+    elif agent == "devin":
+        msgs = devin_show(ref)
     else:
         msgs = []
     # Merge consecutive tool lines so a long tool burst reads as one block.
