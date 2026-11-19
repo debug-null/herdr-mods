@@ -20,6 +20,7 @@ const PAGE = 100; // sessions shown per "加载更多"
 const GLOBAL_DAYS = 3; // 全局默认只看最近几天，避免跨机器列表过长
 const STORE = "history.index";
 const PIN_STORE = "history.pins"; // { "host\\0agent\\0id": { at } } — survives restart
+const JUMP_STORE = "history.jump"; // { at, host, agent, id, file, turn, _home } from Conversation map
 const CACHE_TTL_MS = 60_000;
 const BG_REFRESH_MS = 45_000;
 const SCRIPT_SYNC = "history.script";
@@ -171,9 +172,35 @@ export default class History extends View {
     });
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
+    this._jumpAt = 0;
     this.refresh(cx, { preferCache: true });
     // Disk + shared caches make this cheap; skip when the host entry is still fresh.
     cx.timer.every(BG_REFRESH_MS, (cx) => this.refresh(cx, { background: true }));
+    // Conversation map (and others) can ask us to open a session at a turn.
+    cx.timer.every(400, (cx) => this.consumeJump(cx));
+  }
+
+  consumeJump(cx) {
+    const jump = shared(JUMP_STORE);
+    if (!jump?.at || jump.at === this._jumpAt) return;
+    if (!jump.agent || !jump.file) return;
+    this._jumpAt = jump.at;
+    const host = jump.host || "local";
+    const existing = this.sessions.find((s) =>
+      s.agent === jump.agent && (s.id === jump.id || s.file === jump.file) && sessionHost(s) === host);
+    const session = existing || {
+      agent: jump.agent,
+      id: jump.id,
+      file: jump.file,
+      cwd: jump.cwd || null,
+      title: jump.title || "",
+      turns: jump.turns || 0,
+      updated: jump.updated || Date.now(),
+      created: jump.created || jump.updated || Date.now(),
+      _host: host,
+      _home: jump._home || null,
+    };
+    this.show(session, cx, { turn: Number(jump.turn) || 0, needle: jump.needle || null });
   }
 
   setFilter(key, value, cx) {
@@ -467,15 +494,45 @@ export default class History extends View {
     }
   }
 
-  show(session, cx) {
+  show(session, cx, { turn = null, needle = null } = {}) {
     this.open = session; this.transcript = null; this.loadError = null; this.start = 0; this.top = 0;
+    this._pendingJump = { turn, needle };
     const ref = session.file;
     const machine = sessionMachine(session);
     cx.spawn(async (cx) => {
       try {
         const r = await this.historyExecOn(machine, ["show", session.agent, ref]);
         if (r.code !== 0) throw new Error((r.stderr || r.stdout || "").trim() || `exit ${r.code}`);
-        if (this.open === session) this.transcript = JSON.parse(r.stdout);
+        if (this.open !== session) return;
+        this.transcript = JSON.parse(r.stdout);
+        const pending = this._pendingJump;
+        this._pendingJump = null;
+        if (pending && this.transcript?.messages) {
+          const turns = [];
+          this.transcript.messages.forEach((m, i) => { if (m.role === "user") turns.push(i); });
+          let msg = null;
+          const needle = (pending.needle || "").trim();
+          if (needle) {
+            const hit = turns.find((i) => (this.transcript.messages[i].text || "").includes(needle.slice(0, 40)));
+            if (hit != null) msg = hit;
+          }
+          if (msg == null && pending.turn != null && turns.length) {
+            // Absolute turn index may exceed the shown tail — clamp to the tail window.
+            const idx = Math.min(Math.max(0, pending.turn), turns.length - 1);
+            // If the full session is longer than the tail, prefer the end-aligned index.
+            const aligned = pending.turn >= turns.length
+              ? turns.length - 1
+              : (session.turns && session.turns > turns.length
+                ? Math.min(turns.length - 1, Math.max(0, pending.turn - (session.turns - turns.length)))
+                : idx);
+            msg = turns[aligned];
+          }
+          if (msg != null) {
+            const turnNo = turns.indexOf(msg);
+            this.start = turnNo <= 0 ? 0 : msg;
+            this.top = msg;
+          }
+        }
       } catch (e) { if (this.open === session) this.loadError = String(e); }
       cx.notify();
     });

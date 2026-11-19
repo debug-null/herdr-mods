@@ -4,7 +4,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex } from "gpui-base";
-import { agents, terminals, panes, focused, exec, appHome, theme, checking } from "herdr";
+import { agents, terminals, panes, focused, exec, appHome, theme, checking, run, notify, setShared } from "herdr";
 
 const SCRIPT = () => `${appHome()}/mods/history/history.py`;
 const REMOTE_SCRIPT = '"$HOME/.config/herdr-app/mods/history/history.py"';
@@ -102,11 +102,72 @@ export default class ConversationMap extends View {
     this.turns = []; // [{ text }]
     this.active = 0;
     this.key = null; // address|kind|resume
+    this.session = null; // matched history session for jump
+    this.target = null;
     this.loading = false;
     this.error = null;
     if (checking()) return;
     cx.timer.every(POLL_MS, (cx) => this.refresh(cx));
     this.refresh(cx);
+  }
+
+  // Focus the live agent, scroll its view toward that turn, and open History at it.
+  jumpTo(k, cx) {
+    const target = this.target || targetAgent();
+    const turn = this.turns[k];
+    if (!turn) return;
+    this.active = k;
+    cx.notify();
+
+    if (target?.address) {
+      run("agent.focus", { terminal: target.address });
+      const n = Math.max(1, this.turns.length);
+      // Rough place in scrollback: early turns → top, latest → bottom.
+      if (k <= 0) run("terminal.scroll", { to: "top", terminal: target.address });
+      else if (k >= n - 1) run("terminal.scroll", { to: "bottom", terminal: target.address });
+      else {
+        run("terminal.scroll", { to: "top", terminal: target.address });
+        const pages = Math.max(0.5, (k / (n - 1)) * 12);
+        cx.timer.after(80, () => run("terminal.scroll", { pages, terminal: target.address }));
+      }
+      // Open find bar so the person can refine; needle is in the toast.
+      const needle = (turn.text || "").replace(/\s+/g, " ").trim().slice(0, 48);
+      if (needle && !/^第 \d+ 轮$/.test(needle)) {
+        cx.timer.after(120, () => {
+          try { run("terminal.search", { query: needle, terminal: target.address }); }
+          catch { try { run("terminal.search"); } catch { /* find bar optional */ } }
+        });
+      }
+    }
+
+    if (this.session?.file) {
+      const needle = (turn.text || "").replace(/\s+/g, " ").trim();
+      setShared("history.jump", {
+        at: Date.now(),
+        host: this.session._host || target?.machine || "local",
+        agent: this.session.agent,
+        id: this.session.id,
+        file: this.session.file,
+        cwd: this.session.cwd || target?.cwd || null,
+        title: this.session.title || "",
+        turns: this.session.turns || this.turns.length,
+        updated: this.session.updated || Date.now(),
+        created: this.session.created || Date.now(),
+        _home: this.session._home || null,
+        turn: k,
+        needle: /^第 \d+ 轮$/.test(needle) ? null : needle.slice(0, 80),
+      });
+      run("layout.select", { stack: "panel-body", child: "history" });
+      run("layout.show", { id: "panel" });
+    }
+
+    const label = (turn.text || `第 ${k + 1} 轮`).slice(0, 60);
+    notify({
+      title: "会话地图",
+      body: `第 ${k + 1}/${this.turns.length} 轮 · ${label}`,
+      level: "info",
+      timeout: 2500,
+    });
   }
 
   async historyExec(machine, args) {
@@ -130,6 +191,8 @@ export default class ConversationMap extends View {
     if (!target) {
       if (this.turns.length || this.key) {
         this.turns = [];
+        this.session = null;
+        this.target = null;
         this.key = null;
         this.error = null;
         cx.notify();
@@ -140,6 +203,7 @@ export default class ConversationMap extends View {
     if (!force && key === this.key && this.loading) return;
     if (!force && key === this.key && this.turns.length && Date.now() - (this.loadedAt || 0) < POLL_MS - 500) return;
     this.key = key;
+    this.target = target;
     this.loading = true;
     // Optimistic ticks from core's turn counter while transcript loads.
     if (!this.turns.length && target.turnHint > 0) {
@@ -155,6 +219,9 @@ export default class ConversationMap extends View {
         if (listed.code === 0 && listed.stdout) sessions = JSON.parse(listed.stdout);
         if (this.key !== key) return;
         const session = this.pickSession(sessions, target);
+        this.session = session
+          ? { ...session, _host: target.machine || "local" }
+          : null;
         if (!session?.file) {
           const n = Math.max(target.turnHint, session?.turns || 0);
           this.turns = n > 0 ? Array.from({ length: Math.min(n, 48) }, (_, i) => ({ text: `第 ${i + 1} 轮` })) : [];
@@ -221,7 +288,7 @@ export default class ConversationMap extends View {
         const tip = `Turn ${k + 1}/${turns.length} · ${title}${turn.text.length > 28 ? `\n${turn.text.slice(0, 120)}${turn.text.length > 120 ? "…" : ""}` : ""}`;
         return div().id(`cmap-${k}`).w_full().flex_1().min_h(4).max_h(14).flex().items_center().justify_center().cursor_pointer()
           .tooltip(tip)
-          .on_click((_e, cx) => { this.active = k; cx.notify(); })
+          .on_click((_e, cx) => { cx.stop_propagation(); this.jumpTo(k, cx); })
           .child(div().flex_none().rounded(99).h(on ? 3 : 2)
             .w(on ? 16 : 10).bg(on ? t.accent : t.muted)
             .hover((s) => s.w(16).bg(t.accent)));
