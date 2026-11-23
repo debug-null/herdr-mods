@@ -17,7 +17,13 @@ const SCRIPT = () => `${appHome()}/mods/history/history.py`;
 const REMOTE_SCRIPT_EXPR = '"$HOME/.config/herdr-app/mods/history/history.py"';
 const TOOL_LINES = 6;
 const PAGE = 100; // sessions shown per "加载更多"
-const GLOBAL_DAYS = 3; // 全局默认只看最近几天，避免跨机器列表过长
+const GLOBAL_WINDOWS = [
+  { days: 1, label: "今天" },
+  { days: 3, label: "3天" },
+  { days: 7, label: "7天" },
+  { days: 30, label: "30天" },
+  { days: 0, label: "全部" },
+];
 const STORE = "history.index";
 const PIN_STORE = "history.pins"; // { "host\\0agent\\0id": { at } } — survives restart
 const JUMP_STORE = "history.jump"; // { at, host, agent, id, file, turn, _home } from Conversation map
@@ -147,14 +153,42 @@ function inScope(session, scope, root, repo) {
   return inside(cwd, root);
 }
 
-function inGlobalWindow(session) {
-  const cutoff = Date.now() - GLOBAL_DAYS * 86400 * 1000;
+function inGlobalWindow(session, days = 3) {
+  if (!days || days <= 0) return true;
+  if (days === 1) {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    return (session?.updated || 0) >= start.getTime();
+  }
+  const cutoff = Date.now() - days * 86400 * 1000;
   return (session?.updated || 0) >= cutoff;
+}
+
+function timeBucket(ms) {
+  if (!ms) return "更早";
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  if (ms >= todayStart) return "今天";
+  if (ms >= todayStart - 86400 * 1000) return "昨天";
+  if (ms >= todayStart - 7 * 86400 * 1000) return "近 7 天";
+  return "更早";
+}
+
+function resumeCommandText(session) {
+  const argv = AGENTS[session.agent]?.resume?.(session);
+  if (!argv) return null;
+  const cmd = argv.map((a) => (/[\s"'$`\\]/.test(a) ? shQuote(a) : a)).join(" ");
+  const machine = sessionMachine(session);
+  return machine ? `hc run --on ${machine} -- ${cmd}` : cmd;
 }
 
 export default class History extends View {
   init(_props, cx) {
     this.home = home(); this.sessions = []; this.agent = "all"; this.scope = "here"; this.query = "";
+    this.globalDays = 3;
+    this.showTools = true;
+    this.msgQuery = "";
+    this.msgTyping = false;
     this.open = null; this.transcript = null; this.typing = false;
     this.host = null; // which machine the current index was built for
     this.repo = null; this.stale = false; this.loadingLabel = null;
@@ -164,7 +198,7 @@ export default class History extends View {
     // starts the transcript there), `top` the message at the top of the view.
     this.start = 0; this.top = 0; this.drawnTop = Infinity;
     this.handle = cx.focus_handle();
-    this.input = InputState.new({ placeholder: "搜索会话" });
+    this.input = InputState.new({ placeholder: "搜索会话标题、目录、机器…" });
     this.input.on("change", (_e, cx) => {
       this.query = this.input.value();
       this.shown = PAGE;
@@ -172,6 +206,15 @@ export default class History extends View {
     });
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
+    this.msgInput = InputState.new({ placeholder: "筛选当前会话内的消息…" });
+    this.msgInput.on("change", (_e, cx) => {
+      this.msgQuery = this.msgInput.value();
+      this.start = 0;
+      this.top = 0;
+      cx.notify();
+    });
+    this.msgInput.on("focus", (_e, cx) => { this.msgTyping = true; cx.notify(); });
+    this.msgInput.on("blur", (_e, cx) => { this.msgTyping = false; cx.notify(); });
     this._jumpAt = 0;
     this.refresh(cx, { preferCache: true });
     // Disk + shared caches make this cheap; skip when the host entry is still fresh.
@@ -217,11 +260,11 @@ export default class History extends View {
     cx.notify();
   }
 
-  // Filter once per (sessions, scope, agent, query, roots, pins) — render calls this a lot.
+  // Filter once per (sessions, scope, agent, query, roots, pins, globalDays) — render calls this a lot.
   filtered() {
     const pins = pinMap();
     const key = [
-      this.host, this.agent, this.scope, this.root || "", this.repo || "",
+      this.host, this.agent, this.scope, this.globalDays, this.root || "", this.repo || "",
       this.query, this.sessions.length,
       this.sessions[0]?.id || "", this.sessions[this.sessions.length - 1]?.updated || 0,
       Object.keys(pins).sort().join(","),
@@ -496,6 +539,8 @@ export default class History extends View {
 
   show(session, cx, { turn = null, needle = null } = {}) {
     this.open = session; this.transcript = null; this.loadError = null; this.start = 0; this.top = 0;
+    this.msgQuery = "";
+    this.msgInput.set_value("");
     this._pendingJump = { turn, needle };
     const ref = session.file;
     const machine = sessionMachine(session);
@@ -558,6 +603,13 @@ export default class History extends View {
     });
   }
 
+  copyResume(session, cx) {
+    const cmd = resumeCommandText(session);
+    if (!cmd) return;
+    cx.write_to_clipboard(cmd);
+    notify({ title: "已复制恢复命令", body: cmd, level: "success", timeout: 2200 });
+  }
+
   // Resume straight from the list: a quiet play icon that becomes a button on row hover.
   quickResume(s, hot, t) {
     return h_flex().id(`resume-${sessionHost(s)}-${s.agent}-${s.id}`).h(24).flex_none().gap(4).items_center().justify_center().rounded(6).cursor_pointer()
@@ -587,7 +639,7 @@ export default class History extends View {
     const matched = this.sessions.filter((s) => {
       if (this.agent !== "all" && s.agent !== this.agent) return false;
       if (!inScope(s, this.scope, this.root, this.repo)) return false;
-      if (this.scope === "global" && !inGlobalWindow(s) && !pins[pinKey(s)]) return false;
+      if (this.scope === "global" && !inGlobalWindow(s, this.globalDays) && !pins[pinKey(s)]) return false;
       return this.matchesQuery(s, q);
     });
     // Pinned sessions stay findable: show them even outside 本目录 / 近3天.
@@ -672,7 +724,7 @@ export default class History extends View {
     const latest = {}; // agent -> newest session updated (for chip order)
     let orphanCount = 0;
     for (const s of this.sessions) {
-      if (this.scope === "global" && !inGlobalWindow(s) && !isPinned(s)) continue;
+      if (this.scope === "global" && !inGlobalWindow(s, this.globalDays) && !isPinned(s)) continue;
       if (!s.cwd) orphanCount += 1;
       if (inScope(s, this.scope, this.root, this.repo) || isPinned(s)) {
         counts[s.agent] = (counts[s.agent] ?? 0) + 1;
@@ -683,15 +735,40 @@ export default class History extends View {
     // Chips: whichever agent has the newest session floats first (Codex today, Devin tomorrow…).
     const present = Object.keys(AGENTS).filter((a) => counts[a])
       .sort((a, b) => (latest[b] || 0) - (latest[a] || 0));
+    const winLabel = GLOBAL_WINDOWS.find((w) => w.days === this.globalDays)?.label || `${this.globalDays}天`;
     const empty = this.error
       || (this.loading && !this.sessions.length ? (this.loadingLabel || "正在加载会话…")
         : this.scope !== "all" && this.scope !== "global" && !this.root ? "无当前目录"
           : this.query ? "没有匹配的会话"
             : this.scope === "here" ? "此目录没有会话"
               : this.scope === "repo" ? "此仓库没有会话"
-                : this.scope === "global" ? `近 ${GLOBAL_DAYS} 天没有会话`
+                : this.scope === "global" ? `${winLabel}没有会话`
                   : "没有会话");
     const pathHint = this.scope === "repo" ? (this.repo || this.root) : this.root;
+
+    // Group rows by pinned / 今天 / 昨天 / 近 7 天 / 更早
+    const groupedChildren = [];
+    let lastGroup = null;
+    for (const s of rows) {
+      const grp = isPinned(s) ? "已置顶" : timeBucket(s.updated);
+      if (grp !== lastGroup) {
+        lastGroup = grp;
+        groupedChildren.push(
+          div()
+            .id(`hgrp-${grp}`)
+            .flex_none()
+            .px(8)
+            .pt(groupedChildren.length ? 10 : 4)
+            .pb(3)
+            .text_size(10.5)
+            .font_medium()
+            .text_color(t.dim)
+            .child(grp)
+        );
+      }
+      groupedChildren.push(this.sessionRow(s, t));
+    }
+
     return v_flex().size_full().min_h(0)
       .child(this.header(t, [
         div().font_semibold().child("历史"),
@@ -705,25 +782,51 @@ export default class History extends View {
           .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => this.refresh(cx))
           .child(svg("mods/history/history.svg").size(14).when(this.loading, (el) => el.spin(900))),
       ]))
-      .when(this.scope === "global", (el) => el.child(div().flex_none().px(14).py(6).border_b(1).border_color(t.border)
-        .text_size(11).text_color(t.dim).truncate()
-        .child(`近 ${GLOBAL_DAYS} 天 · ${knownHosts().map((h) => hostLabel(h.host)).join("、")}`)))
+      .when(this.scope === "global", (el) => el.child(
+        h_flex().flex_none().px(10).py(6).gap(4).items_center().border_b_1().border_color(t.border)
+          .child(div().text_size(10.5).text_color(t.dim).truncate().flex_1().child(knownHosts().map((h) => hostLabel(h.host)).join(" · ")))
+          .children(GLOBAL_WINDOWS.map((w) =>
+            div()
+              .id(`gwin-${w.days}`)
+              .h(20)
+              .px(6)
+              .flex()
+              .flex_none()
+              .items_center()
+              .rounded(5)
+              .cursor_pointer()
+              .text_size(10.5)
+              .when(this.globalDays === w.days, (e) => e.bg(t.selected).text_color(t.foreground).font_medium())
+              .when(this.globalDays !== w.days, (e) => e.text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)))
+              .on_click((_e, cx) => this.setFilter("globalDays", w.days, cx))
+              .child(w.label)
+          ))
+      ))
       .when(this.scope !== "all" && this.scope !== "global" && Boolean(pathHint), (el) => el.child(div().flex_none().px(14).py(6).border_b(1).border_color(t.border)
         .text_size(11).text_color(t.dim).truncate().child(short(pathHint, this.home))))
       .when(Boolean(this.loadingLabel && this.sessions.length), (el) => el.child(
         div().flex_none().px(14).py(5).border_b(1).border_color(t.border).text_size(11).text_color(t.muted).child(this.loadingLabel)))
       .child(v_flex().flex_none().px(10).pt(10).pb(8).gap(8).border_b(1).border_color(t.border)
-        .child(div().id("history-search").h(30).px(10).flex().items_center().rounded(8).border_1().border_color(this.typing ? t.accent : t.border).cursor_text()
-          .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.input).h_full().text_size(12).text_color(t.foreground)))
+        .child(h_flex().id("history-search").h(30).px(9).gap(6).items_center().rounded(8).bg(t.surface).border_1().border_color(this.typing ? t.accent : t.border).cursor_text()
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .child(svg("mods/history/search.svg").size(12.5).flex_none().text_color(this.typing ? t.accent : t.dim))
+          .child(Input.new(this.input).flex_1().min_w(0).h_full().text_size(12).text_color(t.foreground))
+          .when(Boolean(this.query), (el) => el.child(
+            div().id("history-search-clear").size(18).flex().flex_none().items_center().justify_center().rounded(4).cursor_pointer()
+              .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
+              .on_click((_e, cx) => { this.input.set_value(""); this.query = ""; this.shown = PAGE; cx.notify(); })
+              .child(svg("mods/history/x.svg").size(11))
+          )))
         .child(h_flex().id("history-agents").gap(4).overflow_x_scrollbar()
           .child(this.chip("agent-all", "全部", this.agent === "all", t, (_e, cx) => this.setFilter("agent", "all", cx)))
           .children(present.map((a) => this.chip(`agent-${a}`, `${AGENTS[a].name} ${counts[a]}`, this.agent === a, t,
             (_e, cx) => this.setFilter("agent", this.agent === a ? "all" : a, cx), this.icon(a, 13, t))))
           .when(orphanCount > 0, (el) => el.child(div().text_size(11).text_color(t.dim).px(4).child(`未归属 ${orphanCount}`)))))
-      .child(v_flex().id("history-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
-        .when(!rows.length, (row) => row.child(div().p(8).text_color(t.dim).child(empty)))
-        .children(rows.map((s) => this.sessionRow(s, t)))
-        .when(more > 0, (row) => row.child(this.moreRow(rows.length, all.length, t))));
+      .child(div().id("history-list").flex_1().min_h(0).w_full().overflow_y_scrollbar()
+        .child(v_flex().w_full().p(6).gap(2)
+          .when(!rows.length, (row) => row.child(div().p(12).text_color(t.dim).child(empty)))
+          .children(groupedChildren)
+          .when(more > 0, (row) => row.child(this.moreRow(rows.length, all.length, t)))));
   }
 
   message(m, i, t) {
@@ -748,33 +851,70 @@ export default class History extends View {
     const pinned = isPinned(s);
     const tr = this.transcript;
     const homePath = s._home || this.home;
+    const mq = this.msgQuery.trim().toLowerCase();
+    const rawMsgs = tr?.messages || [];
+    const filteredMsgs = rawMsgs.filter((m) => {
+      if (!this.showTools && m.role === "tool") return false;
+      if (mq && !(m.text || "").toLowerCase().includes(mq)) return false;
+      return true;
+    });
+
     return v_flex().size_full().min_h(0)
       .child(this.header(t, [
         div().id("history-back").size(24).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().text_size(16).text_color(t.muted)
-          .hover((st) => st.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { this.open = null; this.transcript = null; cx.notify(); }).child("‹"),
+          .hover((st) => st.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { this.open = null; this.transcript = null; this.msgQuery = ""; cx.notify(); }).child("‹"),
         this.icon(s.agent, 16, t),
         div().flex_1().min_w(0).font_semibold().truncate().child(s.title || "(untitled)"),
-        div().flex_none().px(6).py(2).rounded(5).border_1().border_color(t.border).text_size(10).text_color(t.muted)
-          .child(`地图 ${s.turns || 0}`),
-        div().id("history-pin").size(28).flex_none().flex().items_center().justify_center().rounded(7).cursor_pointer()
+        div().id("history-pin").size(26).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer()
           .text_size(14).text_color(pinned ? t.accent : t.dim)
           .hover((st) => st.bg(t.hover).text_color(t.foreground))
           .tooltip(pinned ? "取消置顶" : "置顶（重启仍在）")
           .on_click((_e, cx) => this.togglePin(s, cx))
           .child(pinned ? "★" : "☆"),
       ]))
-      .child(h_flex().flex_none().px(14).py(8).gap(8).items_center().border_b(1).border_color(t.border).text_size(11).text_color(t.dim)
+      .child(h_flex().flex_none().px(12).py(8).gap(6).items_center().border_b_1().border_color(t.border).text_size(11).text_color(t.dim)
         .child(v_flex().flex_1().min_w(0).gap(2)
           .child(div().truncate().child([hostLabel(sessionHost(s)), short(s.cwd, homePath) || "未知文件夹"].filter(Boolean).join(" · ")))
-          .child(div().truncate().child(`${a?.name ?? s.agent} · ${clock(s.created)} → ${ago(s.updated)}`)))
-        .child(div().id("history-resume").h(28).px(12).flex_none().flex().items_center().rounded(7).text_size(12)
+          .child(div().truncate().child(`${a?.name ?? s.agent} · ${clock(s.created)} → ${ago(s.updated)} · ${s.turns || 0} 轮`)))
+        .when(can, (el) => el.child(
+          div().id("history-copy-resume").size(28).flex_none().flex().items_center().justify_center().rounded(7)
+            .border_1().border_color(t.border).bg(t.surface).text_color(t.muted).cursor_pointer()
+            .tooltip("复制恢复命令")
+            .hover((st) => st.bg(t.hover).text_color(t.foreground))
+            .on_click((_e, cx) => this.copyResume(s, cx))
+            .child(svg("mods/history/copy.svg").size(13))
+        ))
+        .child(div().id("history-resume").h(28).px(12).flex_none().flex().items_center().rounded(7).text_size(12).font_medium()
           .bg(can ? t.solid : t.raised).text_color(can ? t.solid_foreground : t.dim).when(can, (el) => el.cursor_pointer())
           .on_click(() => this.resume(s)).child(can ? "继续" : "仅查看")))
-      .when(!tr, (el) => el.child(div().px(14).py(12).text_color(this.loadError ? t.ansi1 : t.dim).child(this.loadError ?? "Loading transcript…")))
-      .when(Boolean(tr && tr.total > tr.messages.length), (el) => el.child(div().flex_none().px(14).pt(8).text_size(11).text_color(t.dim)
-        .child(`显示最近 ${tr.messages.length}/${tr.total} 条`)))
-      .when(Boolean(tr && !tr.messages.length), (el) => el.child(div().px(14).py(12).text_color(t.dim).child("没有消息")))
-      .when(Boolean(tr?.messages.length), (el) => el.child(this.renderTranscript(tr.messages, t)));
+      // In-session filter & tool toggle bar
+      .when(Boolean(tr?.messages?.length), (el) => el.child(
+        h_flex().flex_none().px(10).py(7).gap(6).items_center().border_b_1().border_color(t.border).bg(t.chrome)
+          .child(h_flex().id("history-msg-search").flex_1().min_w(0).h(26).px(8).gap(5).items_center().rounded(6)
+            .bg(t.surface).border_1().border_color(this.msgTyping ? t.accent : t.border)
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .child(svg("mods/history/search.svg").size(12).flex_none().text_color(this.msgTyping ? t.accent : t.dim))
+            .child(Input.new(this.msgInput).flex_1().min_w(0).h_full().text_size(11.5).text_color(t.foreground))
+            .when(Boolean(this.msgQuery), (e) => e.child(
+              div().id("history-msg-clear").size(16).flex().flex_none().items_center().justify_center().rounded(4).cursor_pointer()
+                .text_color(t.dim).hover((st) => st.bg(t.hover).text_color(t.foreground))
+                .on_click((_e, cx) => { this.msgInput.set_value(""); this.msgQuery = ""; this.start = 0; this.top = 0; cx.notify(); })
+                .child(svg("mods/history/x.svg").size(10))
+            )))
+          .child(h_flex().id("history-toggle-tools").h(26).px(8).gap(4).flex_none().items_center().rounded(6).cursor_pointer()
+            .border_1().border_color(this.showTools ? t.border : t.accent)
+            .bg(this.showTools ? t.surface : t.selected)
+            .text_size(11).text_color(this.showTools ? t.muted : t.foreground)
+            .tooltip(this.showTools ? "点击隐藏工具调用，只看纯对话" : "点击显示工具调用记录")
+            .on_click((_e, cx) => { this.showTools = !this.showTools; this.start = 0; this.top = 0; cx.notify(); })
+            .child(svg("mods/history/terminal.svg").size(11.5))
+            .child(this.showTools ? "含工具" : "纯对话"))
+      ))
+      .when(!tr, (el) => el.child(div().px(14).py(12).text_color(this.loadError ? t.ansi1 : t.dim).child(this.loadError ?? "正在加载对话记录…")))
+      .when(Boolean(tr && (tr.total > tr.messages.length || mq)), (el) => el.child(div().flex_none().px(14).pt(6).text_size(11).text_color(t.dim)
+        .child(mq ? `匹配 ${filteredMsgs.length} / ${rawMsgs.length} 条消息` : `显示最近 ${tr.messages.length}/${tr.total} 条`)))
+      .when(Boolean(tr && !filteredMsgs.length), (el) => el.child(div().px(14).py(12).text_color(t.dim).child(mq ? "当前会话没有匹配的消息" : "没有消息")))
+      .when(Boolean(filteredMsgs.length), (el) => el.child(this.renderTranscript(filteredMsgs, t)));
   }
 
   // Conversation map: right-edge tick rail, one short bar per user turn.
@@ -837,7 +977,8 @@ export default class History extends View {
       .on_key_down((e, cx) => {
         if (e.key !== "escape") return;
         if (this.typing) { this.typing = false; this.handle.focus(); }
-        else if (this.open) { this.open = null; this.transcript = null; }
+        else if (this.msgTyping) { this.msgTyping = false; this.handle.focus(); }
+        else if (this.open) { this.open = null; this.transcript = null; this.msgQuery = ""; }
         else return;
         cx.stop_propagation(); cx.notify();
       })

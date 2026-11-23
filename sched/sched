@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""herdr-sched — CLI for the herdr-app scheduler. Agents and humans both drive this.
+
+  herdr-sched add [--name N]
+            (--every MIN | --cron "M H D MON W" | --at "YYYY-MM-DD HH:MM" | --in MIN)
+            (--cmd "shell command" [--cwd DIR | --here] [--timeout SEC]
+           | (--terminal T | --self) --text "msg" [--if idle|working]
+           | --argv "claude ..." [--task "first task"] [--tab-name N] [--folder DIR | --here] [--focus])
+            [--notify off|err|always] [--disabled]
+  herdr-sched ls [--json]           jobs + next/last run
+  herdr-sched logs <id> [-n 5] [--json]
+  herdr-sched rm <id>               delete a job
+  herdr-sched enable|disable <id>
+  herdr-sched run <id>              fire it now (even if disabled)
+  herdr-sched status [--json]       engine heartbeat + counts
+
+Everything is just files under ~/.config/herdr-app/sched/ — see AGENTS.md.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+
+DIR = os.path.dirname(os.path.realpath(__file__))
+JOBS = os.path.join(DIR, "jobs.json")
+STATE = os.path.join(DIR, "state.json")
+RUNNOW = os.path.join(DIR, "run-now")
+
+
+def load():
+    try:
+        with open(JOBS) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"jobs": []}
+
+
+def save(data):
+    tmp = "%s.tmp.%d" % (JOBS, os.getpid())
+    with open(tmp, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, JOBS)
+
+
+def state():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def detect_self_terminal():
+    tid = os.environ.get("HC_TERMINAL_ID", "").strip()
+    if tid:
+        return tid
+    try:
+        p = subprocess.run(
+            [os.environ.get("HERDR_APP_BIN", "herdr-app"), "status"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if p.returncode == 0:
+            data = json.loads(p.stdout)
+            if data.get("agent"):
+                return str(data["agent"])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    sys.exit("cannot detect current terminal (set --terminal <id> explicitly or run inside a Herdr terminal)")
+
+
+def add(a):
+    if not a.name:
+        a.name = a.cmd or a.text or a.argv or "job"
+    job = {
+        "id": a.id or f"j{int(time.time()*1000):x}",
+        "name": a.name,
+        "enabled": not a.disabled,
+    }
+    if a.every is not None:
+        if a.every < 0.5:
+            sys.exit("--every must be >= 0.5")
+        job["schedule"] = {"every_min": a.every}
+    elif a.cron:
+        if len(a.cron.split()) != 5:
+            sys.exit("bad --cron, want 5 fields: M H D MON W")
+        job["schedule"] = {"cron": a.cron}
+    elif a.at:
+        try:
+            at = datetime.fromisoformat(a.at.replace(" ", "T")).isoformat(timespec="minutes")
+        except ValueError:
+            sys.exit("bad --at, want YYYY-MM-DD HH:MM")
+        job["schedule"] = {"at": at}
+    elif a.in_min is not None:
+        if a.in_min <= 0:
+            sys.exit("--in must be > 0")
+        target = datetime.now() + timedelta(minutes=a.in_min)
+        job["schedule"] = {"at": target.isoformat(timespec="minutes")}
+    else:
+        sys.exit("need --every / --cron / --at / --in")
+
+    cwd_here = os.getcwd() if a.here else None
+
+    if a.cmd:
+        job["action"] = {"type": "exec", "cmd": a.cmd}
+        cwd = a.cwd or cwd_here
+        if cwd:
+            job["action"]["cwd"] = cwd
+        if a.timeout:
+            job["timeout_sec"] = a.timeout
+    elif a.self_term or a.terminal or a.text:
+        term = detect_self_terminal() if a.self_term else a.terminal
+        if not (term and a.text):
+            sys.exit("prompt needs both (--terminal or --self) and --text")
+        job["action"] = {"type": "prompt", "terminal": term, "text": a.text}
+        only_if = a.only_if if a.only_if is not None else ("idle" if a.self_term else None)
+        if only_if and only_if != "always":
+            job["action"]["if"] = only_if
+    elif a.argv:
+        job["action"] = {
+            "type": "spawn",
+            "argv": a.argv.split(),
+            "task": a.task or "",
+            "focus": bool(a.focus),
+        }
+        if a.tab_name:
+            job["action"]["name"] = a.tab_name
+        folder = a.folder or cwd_here
+        if folder:
+            job["action"]["folder"] = folder
+    else:
+        sys.exit("need --cmd / (--terminal|--self)+--text / --argv")
+
+    if a.notify in ("err", "always"):
+        job["notify"] = a.notify
+
+    data = load()
+    data["jobs"] = [j for j in data["jobs"] if j["id"] != job["id"]] + [job]
+    save(data)
+    print(job["id"])
+
+
+def fmt_ts(ts):
+    if not ts:
+        return "—"
+    d = ts - time.time()
+    if abs(d) < 60:
+        return "现在" if d < 0 else "1分内"
+    if d > 0:
+        return f"{int(d/60)+1}分后" if d < 3600 else datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+    return f"{int(-d/60)}分前" if -d < 3600 else datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+
+
+def fmt_dur(ms):
+    if ms is None:
+        return ""
+    if ms < 1000:
+        return f"{ms}ms"
+    if ms < 60000:
+        return f"{ms/1000:.1f}s"
+    return f"{ms/60000:.1f}m"
+
+
+def ls(as_json=False):
+    st = state().get("jobs", {})
+    jobs = load()["jobs"]
+    if as_json:
+        out = [{"job": j, "state": st.get(j["id"], {})} for j in jobs]
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return
+    if not jobs:
+        print("(no jobs)")
+        return
+    for j in jobs:
+        s = st.get(j["id"], {})
+        sch = j.get("schedule", {})
+        when = (
+            f"every {sch['every_min']}m"
+            if "every_min" in sch
+            else sch.get("cron") or sch.get("at") or "?"
+        )
+        flag = "run" if s.get("running") else ("on " if j.get("enabled", True) else "off")
+        mark = {"ok": "✓", "err": "✗", "skip": "⊘"}.get(s.get("last_status"), "·")
+        dur = fmt_dur(s.get("last_duration_ms"))
+        dur_s = f" ({dur})" if dur else ""
+        print(
+            f"{flag} {j['id']:<18} {j.get('name', ''):<16} {when:<18} "
+            f"next:{fmt_ts(s.get('next_run')):<10} last:{mark} {fmt_ts(s.get('last_run'))}{dur_s}"
+        )
+
+
+def logs(jid, limit, as_json=False):
+    st = state().get("jobs", {}).get(jid)
+    if not st:
+        sys.exit(f"no state for {jid}")
+    hist = (st.get("history") or [])[:limit]
+    if as_json:
+        print(json.dumps(hist, ensure_ascii=False, indent=2))
+        return
+    if not hist:
+        print("(no runs yet)")
+        return
+    for item in hist:
+        tstr = datetime.fromtimestamp(item["ts"]).strftime("%Y-%m-%d %H:%M:%S")
+        mark = {"ok": "✓", "err": "✗", "skip": "⊘"}.get(item.get("status"), "·")
+        dur = fmt_dur(item.get("duration_ms"))
+        forced = " [manual]" if item.get("forced") else ""
+        print(f"{mark} {tstr}  {dur}{forced}")
+        if item.get("msg"):
+            for line in item["msg"].splitlines():
+                print("  " + line)
+
+
+def edit(jid, fn):
+    data = load()
+    hit = [j for j in data["jobs"] if j["id"] == jid]
+    if not hit:
+        sys.exit(f"no job {jid}")
+    fn(hit[0])
+    save(data)
+
+
+def remove(jid):
+    data = load()
+    before = len(data["jobs"])
+    data["jobs"] = [j for j in data["jobs"] if j["id"] != jid]
+    if len(data["jobs"]) == before:
+        sys.exit(f"no job {jid}")
+    save(data)
+
+
+def status(as_json=False):
+    e = state().get("engine", {})
+    hb = e.get("heartbeat")
+    age = int(time.time() - hb) if hb else None
+    running = e.get("running") or []
+    jobs = load()["jobs"]
+    alive = age is not None and age < 20
+    if as_json:
+        print(json.dumps({
+            "alive": alive,
+            "pid": e.get("pid"),
+            "heartbeat_age_sec": age,
+            "jobs": len(jobs),
+            "running": running,
+            "jobs_error": e.get("jobs_error"),
+        }, ensure_ascii=False, indent=2))
+        return
+    print(
+        f"engine: {'alive' if alive else 'dead'}"
+        + (f" (pid {e.get('pid')}, heartbeat {age}s ago)" if age is not None else "")
+    )
+    print(f"jobs: {len(jobs)} (running: {len(running)})")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="herdr-sched")
+    sub = p.add_subparsers(dest="op", required=True)
+
+    a = sub.add_parser("add")
+    a.add_argument("--name")
+    a.add_argument("--id")
+    g = a.add_mutually_exclusive_group()
+    g.add_argument("--every", type=float)
+    g.add_argument("--cron")
+    g.add_argument("--at")
+    g.add_argument("--in", dest="in_min", type=float, help="one-shot after N minutes")
+    a.add_argument("--cmd")
+    a.add_argument("--cwd")
+    a.add_argument("--here", action="store_true", help="use current directory as cwd/folder")
+    a.add_argument("--timeout", type=float)
+    a.add_argument("--terminal")
+    a.add_argument("--self", dest="self_term", action="store_true", help="target current Herdr terminal ($HC_TERMINAL_ID)")
+    a.add_argument("--text")
+    a.add_argument("--if", dest="only_if", choices=["idle", "working", "always"])
+    a.add_argument("--argv")
+    a.add_argument("--task")
+    a.add_argument("--tab-name")
+    a.add_argument("--folder")
+    a.add_argument("--focus", action="store_true")
+    a.add_argument("--notify", choices=["off", "err", "always"], default="off")
+    a.add_argument("--disabled", action="store_true")
+
+    l = sub.add_parser("logs")
+    l.add_argument("id")
+    l.add_argument("-n", "--limit", type=int, default=5)
+    l.add_argument("--json", action="store_true")
+
+    for op in ("rm", "enable", "disable", "run"):
+        s = sub.add_parser(op)
+        s.add_argument("id")
+
+    ls_p = sub.add_parser("ls")
+    ls_p.add_argument("--json", action="store_true")
+
+    st_p = sub.add_parser("status")
+    st_p.add_argument("--json", action="store_true")
+
+    a = p.parse_args()
+
+    if a.op == "add":
+        add(a)
+    elif a.op == "ls":
+        ls(a.json)
+    elif a.op == "logs":
+        logs(a.id, a.limit, a.json)
+    elif a.op == "status":
+        status(a.json)
+    elif a.op == "rm":
+        remove(a.id)
+        print("removed")
+    elif a.op in ("enable", "disable"):
+        edit(a.id, lambda j: j.__setitem__("enabled", a.op == "enable"))
+        print(a.op + "d")
+    elif a.op == "run":
+        with open(RUNNOW, "a") as f:
+            f.write(a.id + "\n")
+        print("queued")
+
+
+if __name__ == "__main__":
+    main()

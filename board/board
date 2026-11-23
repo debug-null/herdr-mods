@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""herdr-board — CLI for the Herdr project Kanban board (Trello-style).
+
+Columns: ideas | todo | doing | review | done
+
+  herdr-board add --title T [--notes N] [--col ideas|todo|doing|review|done]
+                  [--priority p1|p2|p3] [--project NAME] [--path DIR | --here]
+                  [--machine M] [--tags a,b]
+  herdr-board ls [--col COL] [--project NAME] [--json]
+  herdr-board move <id> <ideas|todo|doing|review|done>
+  herdr-board edit <id> [--title T] [--notes N] [--priority p1|p2|p3]
+                   [--project NAME] [--path DIR] [--tags a,b]
+  herdr-board rm <id>
+  herdr-board stats [--json]
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+DIR = os.path.dirname(os.path.realpath(__file__))
+TASKS_FILE = os.path.join(DIR, "tasks.json")
+COLS = ("ideas", "todo", "doing", "review", "done")
+COL_LABELS = {
+    "ideas": "💡 灵感池",
+    "todo": "📋 待开发",
+    "doing": "⚙️ 进行中",
+    "review": "👀 待验收",
+    "done": "✅ 已完成",
+}
+
+
+def load():
+    try:
+        with open(TASKS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data.get("tasks"), list):
+            data["tasks"] = []
+        return data
+    except (OSError, ValueError):
+        return {"version": 1, "tasks": []}
+
+
+def save(data):
+    tmp = f"{TASKS_FILE}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, TASKS_FILE)
+
+
+def infer_git_root(cwd):
+    try:
+        p = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if p.returncode == 0 and p.stdout.strip():
+            return p.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return cwd
+
+
+def build_project(name, path, machine, use_here):
+    resolved_path = None
+    if path:
+        resolved_path = os.path.abspath(os.path.expanduser(path))
+    elif use_here:
+        resolved_path = infer_git_root(os.getcwd())
+
+    proj_name = (name or "").strip()
+    if not proj_name and resolved_path:
+        proj_name = os.path.basename(resolved_path.rstrip("/")) or resolved_path
+    if not proj_name and not resolved_path:
+        return None
+    return {
+        "name": proj_name or "未命名项目",
+        "path": resolved_path,
+        "machine": machine or None,
+    }
+
+
+def add(a):
+    now = int(time.time() * 1000)
+    tid = a.id or f"b{now:x}"[-10:]
+    proj = build_project(a.project, a.path, a.machine, a.here)
+    tags = [t.strip() for t in (a.tags or "").split(",") if t.strip()]
+    task = {
+        "id": tid,
+        "title": a.title.strip(),
+        "notes": (a.notes or "").strip(),
+        "column": a.col,
+        "priority": a.priority,
+        "project": proj,
+        "tags": tags,
+        "createdAt": now,
+        "updatedAt": now,
+        "doneAt": now if a.col == "done" else None,
+    }
+    data = load()
+    data["tasks"] = [t for t in data["tasks"] if t.get("id") != tid]
+    data["tasks"].insert(0, task)
+    save(data)
+    print(tid)
+
+
+def ls(a):
+    tasks = load()["tasks"]
+    if a.col:
+        tasks = [t for t in tasks if t.get("column") == a.col]
+    if a.project:
+        q = a.project.lower()
+        tasks = [
+            t for t in tasks
+            if q in ((t.get("project") or {}).get("name") or "").lower()
+            or q in ((t.get("project") or {}).get("path") or "").lower()
+        ]
+    if a.json:
+        print(json.dumps(tasks, ensure_ascii=False, indent=2))
+        return
+    if not tasks:
+        print("(no tasks)")
+        return
+    for col in COLS:
+        grp = [t for t in tasks if t.get("column") == col]
+        if not grp:
+            continue
+        print(f"\n{COL_LABELS[col]} ({len(grp)})")
+        for t in grp:
+            proj = (t.get("project") or {}).get("name") or "全局"
+            prio = (t.get("priority") or "p2").upper()
+            ag = (t.get("agent") or {}).get("address")
+            ag_s = f" [{ag}]" if ag else ""
+            print(f"  {t['id']:<11} [{prio}] ({proj}) {t.get('title', '')}{ag_s}")
+
+
+def move(a):
+    data = load()
+    hit = next((t for t in data["tasks"] if t.get("id") == a.id), None)
+    if not hit:
+        sys.exit(f"no task {a.id}")
+    now = int(time.time() * 1000)
+    hit["column"] = a.col
+    hit["updatedAt"] = now
+    hit["doneAt"] = now if a.col == "done" else None
+    save(data)
+    print(f"moved {a.id} -> {a.col}")
+
+
+def edit(a):
+    data = load()
+    hit = next((t for t in data["tasks"] if t.get("id") == a.id), None)
+    if not hit:
+        sys.exit(f"no task {a.id}")
+    if a.title is not None:
+        hit["title"] = a.title.strip()
+    if a.notes is not None:
+        hit["notes"] = a.notes.strip()
+    if a.priority is not None:
+        hit["priority"] = a.priority
+    if a.tags is not None:
+        hit["tags"] = [x.strip() for x in a.tags.split(",") if x.strip()]
+    if a.project is not None or a.path is not None or a.machine is not None:
+        cur = hit.get("project") or {}
+        hit["project"] = build_project(
+            a.project if a.project is not None else cur.get("name"),
+            a.path if a.path is not None else cur.get("path"),
+            a.machine if a.machine is not None else cur.get("machine"),
+            False,
+        )
+    hit["updatedAt"] = int(time.time() * 1000)
+    save(data)
+    print("updated")
+
+
+def remove(a):
+    data = load()
+    before = len(data["tasks"])
+    data["tasks"] = [t for t in data["tasks"] if t.get("id") != a.id]
+    if len(data["tasks"]) == before:
+        sys.exit(f"no task {a.id}")
+    save(data)
+    print("removed")
+
+
+def stats(a):
+    tasks = load()["tasks"]
+    counts = {c: sum(1 for t in tasks if t.get("column") == c) for c in COLS}
+    if a.json:
+        print(json.dumps({"total": len(tasks), "by_column": counts}, ensure_ascii=False, indent=2))
+        return
+    parts = [f"{c}:{counts[c]}" for c in COLS]
+    print(f"total {len(tasks)} (" + "  ".join(parts) + ")")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="herdr-board")
+    sub = p.add_subparsers(dest="op", required=True)
+
+    a = sub.add_parser("add")
+    a.add_argument("--id")
+    a.add_argument("--title", required=True)
+    a.add_argument("--notes", default="")
+    a.add_argument("--col", choices=COLS, default="ideas")
+    a.add_argument("--priority", choices=("p1", "p2", "p3"), default="p2")
+    a.add_argument("--project")
+    a.add_argument("--path")
+    a.add_argument("--machine")
+    a.add_argument("--here", action="store_true", help="bind to current git repo / folder")
+    a.add_argument("--tags", default="")
+
+    l = sub.add_parser("ls")
+    l.add_argument("--col", choices=COLS)
+    l.add_argument("--project")
+    l.add_argument("--json", action="store_true")
+
+    m = sub.add_parser("move")
+    m.add_argument("id")
+    m.add_argument("col", choices=COLS)
+
+    e = sub.add_parser("edit")
+    e.add_argument("id")
+    e.add_argument("--title")
+    e.add_argument("--notes")
+    e.add_argument("--priority", choices=("p1", "p2", "p3"))
+    e.add_argument("--project")
+    e.add_argument("--path")
+    e.add_argument("--machine")
+    e.add_argument("--tags")
+
+    r = sub.add_parser("rm")
+    r.add_argument("id")
+
+    s = sub.add_parser("stats")
+    s.add_argument("--json", action="store_true")
+
+    args = p.parse_args()
+    if args.op == "add":
+        add(args)
+    elif args.op == "ls":
+        ls(args)
+    elif args.op == "move":
+        move(args)
+    elif args.op == "edit":
+        edit(args)
+    elif args.op == "rm":
+        remove(args)
+    elif args.op == "stats":
+        stats(args)
+
+
+if __name__ == "__main__":
+    main()

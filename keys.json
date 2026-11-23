@@ -32,7 +32,7 @@
     "f2": "tab.rename",
     "shift-f2": "space.rename",
     "cmd-/": "app.help",
-    "cmd-shift-/": "app.help",
+    "cmd-shift-/": "status-pro.keybinds",
     "cmd-b": "layout.toggle:sidebar",
     "cmd-=": "app.zoom_in",
     "cmd-+": "app.zoom_in",
@@ -58,7 +58,12 @@
     "ctrl-9": "space.select:9",
     "ctrl-tab": "tab.next",
     "cmd-shift-w": "pane.close",
-    "cmd-shift-b": "mod.open:herdr-web-browser"
+    "cmd-shift-b": "mod.open:herdr-web-browser",
+    "cmd-shift-i": "board-entry.quick",
+    "cmd-shift-k": "board-entry.open",
+    "cmd-shift-j": "sched-entry.open",
+    "cmd-shift-y": "status-pro.prompts",
+    "cmd-shift-s": "status-pro.skills"
   },
   "terminal": {
     "cmd-f": "terminal.search",

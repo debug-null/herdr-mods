@@ -19,11 +19,13 @@ from urllib.parse import unquote, urlparse
 
 HOME = os.path.expanduser("~")
 CACHE = os.path.join(HOME, ".cache", "herdr-history", "index.json")
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 TITLE_MAX = 160
 TEXT_MAX = 6000
 SHOW_MAX = 400
 _DEVIN_CWD = re.compile(r"Current workspace directories:\s*\n\s+(.+?) \(cwd\)")
+_NOISE_CWD_PARTS = ("/.claude-mem/", "/.claude-mem/observer-sessions")
+_NOISE_TITLE_PREFIXES = ("Condense the tool payload below",)
 
 
 def clip(text, n):
@@ -110,6 +112,8 @@ def file_uri_path(uri):
 # ---------- Claude Code ----------
 
 def claude_index(path):
+    if "-claude-mem-observer-sessions-" in path:
+        return None
     title = ai_title = first = cwd = None
     created = updated = 0
     turns = 0
@@ -137,9 +141,13 @@ def claude_index(path):
                     first = first or text
     if not turns:
         return None
+    if cwd and any(sub in cwd for sub in _NOISE_CWD_PARTS):
+        return None
+    picked = clip(title or ai_title or first, TITLE_MAX)
+    if any(picked.startswith(pref) for pref in _NOISE_TITLE_PREFIXES):
+        return None
     return {"agent": "claude", "id": sid, "file": path, "cwd": cwd, "created": created,
-            "updated": updated, "turns": turns,
-            "title": clip(title or ai_title or first, TITLE_MAX)}
+            "updated": updated, "turns": turns, "title": picked}
 
 
 def claude_show(path):
